@@ -1,0 +1,14 @@
+# TeleStash - open-source Google Photos-style gallery powered by Telegram storage
+
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+build/
+/captures
+.externalNativeBuild
+.cxx
+*.apk
+*.aab
+!releases/*.apk

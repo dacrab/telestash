@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- cloud shape -->
+    <group>
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M38,64 C30,64 24,58 24,50 C24,42 30,36 38,36 C40,28 47,22 56,22 C66,22 74,29 75,38 C83,38 90,45 90,54 C90,60 85,64 79,64 Z" />
+        <!-- arrow up (stash) -->
+        <path
+            android:fillColor="#2AABEE"
+            android:pathData="M58,32 L66,42 L61,42 L61,56 L55,56 L55,42 L50,42 Z" />
+    </group>
+</vector>
