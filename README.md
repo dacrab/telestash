@@ -14,11 +14,13 @@ closed ones like Unlim.
 
 ## Features
 
-- Phone-number login (like the real Telegram client), code + 2FA cloud password support
-- Upload photos from the system photo picker — sent losslessly as documents
-- 3-column gallery grid with instant previews from TDLib's local cache
-- Full-screen viewer: metadata, save back to device gallery, delete from Telegram
-- Endless scroll through your photo history
+- **First-run onboarding**: paste your own `api_id`/`api_hash` (from my.telegram.org) — stored on-device only, no build-time config needed
+- Phone-number login (like the real Telegram client), SMS code + 2FA cloud password support
+- Upload multiple photos/videos per pick (system photo picker) — sent losslessly as documents
+- **Auto-backup** (optional, Settings): WorkManager periodically uploads new device photos/videos to Telegram, with Wi-Fi-only and charging-only constraints
+- **Encrypted TDLib database**: the local TDLib key is generated once and wrapped by Android Keystore (AES/GCM) — never stored in plaintext
+- 3-column gallery grid backed by a Room cache — instant startup, endless scroll, "backed up" cloud badge on device photos
+- Full-screen viewer: **pinch-to-zoom** (zoomable lib), **ExoPlayer video streaming**, metadata, save back to device, delete from Telegram
 - 100% local: no third-party server, no tracking, no bot token required
 
 ## Getting your Telegram API credentials
@@ -30,17 +32,9 @@ TeleStash needs a Telegram `api_id` / `api_hash` pair (free, takes 2 minutes):
 3. Create an app (any title, e.g. `TeleStash`)
 4. Copy `api_id` and `api_hash`
 
-Then edit `app/src/main/java/com/telestash/AppViewModel.kt`:
-
-```kotlin
-object TgCredentials {
-    const val API_ID = 1234567      // your api_id
-    const val API_HASH = "abcdef..." // your api_hash
-}
-```
-
-> Keep these private. Never commit them to a public repo. (For a personal build this
-> is fine; for distributing your own builds, move them into `local.properties`.)
+The app asks for these on first launch. Keep them private; they're stored in
+DataStore on your device only. (To bake them into a personal build instead, put
+them in `AppViewModel.kt`'s startup or use a `local.properties` scheme.)
 
 ## Building
 
@@ -66,11 +60,15 @@ Or open the project in Android Studio and press Run.
   [tdlib-android](https://github.com/AkashPriyadarshii/tdlib-android) distribution,
   Boost-licensed, CI-built from the official tdlib/td source).
 - **Upload** — files are staged in app cache and sent via `sendMessage` with an
-  `InputMessageDocument` to Saved Messages (chat id 0). Documents skip Telegram's
-  photo compression pipeline, so originals are preserved byte-for-byte.
-- **Gallery** — `getChatHistory` on Saved Messages, mapped into a grid; thumbnails
-  come from TDLib's file cache (or a lightweight minithumbnail while downloading).
-- **Delete** — messages are deleted with `revoke`, removing them from Telegram.
+  `InputMessageDocument` to Saved Messages (resolved via `getOption("my_id")` →
+  `createPrivateChat`). Documents skip Telegram's photo compression pipeline, so
+  originals are preserved byte-for-byte.
+- **Gallery** — Room caches message metadata; `getChatHistory` pages sync it. Thumbnails
+  come from TDLib's file cache, downloading on demand.
+- **Auto-backup** — `BackupWorker` (WorkManager, ~6h periodic) scans MediaStore for
+  images/videos not yet uploaded (deduped by MediaStore URI) and uploads them.
+- **Security** — TDLib's local database is encrypted with a 64-byte key that is
+  generated once and stored only in Keystore-wrapped form (AES/GCM).
 
 ## Storage notes
 
@@ -82,12 +80,11 @@ Or open the project in Android Studio and press Run.
 
 ## Roadmap
 
-- [ ] Auto-backup of new device photos (WorkManager sync)
 - [ ] Date-grouped timeline (months/years headers)
 - [ ] Albums via Saved Messages topics
 - [ ] Multi-select operations (delete/download)
-- [ ] Video streaming playback
-- [ ] Photo picker with "backed up" indicators
+- [ ] Instant local-camera-upload ("backup this folder only")
+- [ ] Duplicate detection (perceptual hashing)
 
 ## License
 

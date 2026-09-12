@@ -4,7 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.ui.TeleStashApp
@@ -17,6 +17,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             TeleStashTheme {
                 val state = vm.auth.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) { vm.start() }
                 TeleStashApp(vm, state)
             }
         }
