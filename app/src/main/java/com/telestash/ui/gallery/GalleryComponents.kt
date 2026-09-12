@@ -1,6 +1,5 @@
 package com.telestash.ui.gallery
 
-import android.graphics.BitmapFactory
 import android.view.ViewGroup
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -9,6 +8,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
@@ -16,7 +16,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -26,7 +25,6 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import coil.compose.AsyncImage
-import com.telestash.AppViewModel
 import com.telestash.model.StashItem
 import com.telestash.td.TgClient
 import net.engawapg.lib.zoomable.rememberZoomState
@@ -133,10 +131,8 @@ private fun StashItem.minithumbPlaceholder() {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun GalleryCell(
-    vm: AppViewModel,
     item: StashItem,
     selected: Boolean = false,
-    selecting: Boolean = false,
     onClick: () -> Unit = {},
     onLongClick: () -> Unit = {},
 ) {
@@ -223,7 +219,11 @@ fun PhotoViewerDialog(
                         maxLines = 1
                     )
                     IconButton(onClick = onDismiss) {
-                                        Text("✕", color = Color.White)
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = "Close",
+                            tint = Color.White
+                        )
                     }
                 }
 

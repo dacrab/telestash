@@ -14,39 +14,38 @@ import kotlinx.coroutines.flow.map
 
 private val Context.settings: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
-/**
- * App settings backed by DataStore. Telegram api credentials are provided by the user
- * on first launch (or baked in at build time for personal use).
- */
-class SettingsRepository(private val context: Context) {
+private object Keys {
+    val API_ID = intPreferencesKey("tg_api_id")
+    val API_HASH = stringPreferencesKey("tg_api_hash")
+    val AUTO_BACKUP = booleanPreferencesKey("auto_backup_enabled")
+    val WIFI_ONLY = booleanPreferencesKey("backup_wifi_only")
+    val CHARGING_ONLY = booleanPreferencesKey("backup_charging_only")
+    val BACKUP_FOLDERS = stringPreferencesKey("backup_folders")
+    val DEDUPE = booleanPreferencesKey("dedupe_enabled")
+}
 
-    private object Keys {
-        val API_ID = intPreferencesKey("tg_api_id")
-        val API_HASH = stringPreferencesKey("tg_api_hash")
-        val AUTO_BACKUP = booleanPreferencesKey("auto_backup_enabled")
-        val BACKUP_ON_WIFI = booleanPreferencesKey("backup_wifi_only")
-        val BACKUP_WHEN_CHARGING = booleanPreferencesKey("backup_charging_only")
-        val ONBOARDED = booleanPreferencesKey("onboarded")
-        val BACKUP_FOLDERS = stringPreferencesKey("backup_folders")
-        val DEDUPE = booleanPreferencesKey("dedupe_enabled")
-    }
+/** App settings backed by DataStore. */
+class SettingsRepository(private val context: Context) {
 
     val credentials: Flow<Pair<Int, String>> = context.settings.data.map { p ->
         (p[Keys.API_ID] ?: 0) to (p[Keys.API_HASH] ?: "")
     }
 
+    suspend fun credentialsOnce(): Pair<Int, String> = credentials.first()
+
     suspend fun setCredentials(apiId: Int, apiHash: String) {
         context.settings.edit { it[Keys.API_ID] = apiId; it[Keys.API_HASH] = apiHash }
     }
 
-    suspend fun credentialsOnce(): Pair<Int, String> = credentials.first()
-
     val autoBackup: Flow<Boolean> = context.settings.data.map { it[Keys.AUTO_BACKUP] ?: false }
-    val wifiOnly: Flow<Boolean> = context.settings.data.map { it[Keys.BACKUP_ON_WIFI] ?: true }
-    val chargingOnly: Flow<Boolean> = context.settings.data.map { it[Keys.BACKUP_WHEN_CHARGING] ?: false }
+    val wifiOnly: Flow<Boolean> = context.settings.data.map { it[Keys.WIFI_ONLY] ?: true }
+    val chargingOnly: Flow<Boolean> = context.settings.data.map { it[Keys.CHARGING_ONLY] ?: false }
 
     /** Comma-separated MediaStore bucket names to back up; empty = all folders. */
-    val backupFolders: Flow<String> = context.settings.data.map { it[Keys.BACKUP_FOLDERS] ?: "" }
+    val backupFolders: Flow<Set<String>> = context.settings.data.map { p ->
+        (p[Keys.BACKUP_FOLDERS] ?: "").split(",").map { it.trim() }
+            .filter { it.isNotBlank() }.toSet()
+    }
 
     suspend fun setBackupFolders(folders: Set<String>) {
         context.settings.edit { it[Keys.BACKUP_FOLDERS] = folders.joinToString(",") }
@@ -63,16 +62,10 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun setWifiOnly(wifi: Boolean) {
-        context.settings.edit { it[Keys.BACKUP_ON_WIFI] = wifi }
+        context.settings.edit { it[Keys.WIFI_ONLY] = wifi }
     }
 
     suspend fun setChargingOnly(charging: Boolean) {
-        context.settings.edit { it[Keys.BACKUP_WHEN_CHARGING] = charging }
-    }
-
-    val onboarded: Flow<Boolean> = context.settings.data.map { it[Keys.ONBOARDED] ?: false }
-
-    suspend fun setOnboarded() {
-        context.settings.edit { it[Keys.ONBOARDED] = true }
+        context.settings.edit { it[Keys.CHARGING_ONLY] = charging }
     }
 }

@@ -2,8 +2,6 @@ package com.telestash.data
 
 import android.content.Context
 import androidx.room.Room
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 
 /** Process-wide Room holder; the Worker and the UI share one database. */
 object StashDbHolder {
@@ -15,6 +13,10 @@ object StashDbHolder {
                 context.applicationContext,
                 StashDb::class.java,
                 "stash.db"
-            ).build().also { db = it }
+            )
+                // v2 added phash/topicId to a cache-only db: drop & rebuild is fine
+                .fallbackToDestructiveMigration()
+                .build()
+                .also { db = it }
         }
 }

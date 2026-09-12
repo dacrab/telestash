@@ -20,6 +20,9 @@ import com.telestash.data.ItemEntity
 import com.telestash.data.SettingsRepository
 import com.telestash.data.StashDbHolder
 import com.telestash.model.StashItem
+import com.telestash.model.messageToEntity
+import com.telestash.model.toEntity
+import com.telestash.model.toStashItem
 import com.telestash.td.TdException
 import com.telestash.td.TgClient
 import com.telestash.util.PerceptualHash
@@ -32,6 +35,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -52,11 +56,12 @@ sealed interface AuthUi {
 data class GalleryUi(
     val items: List<StashItem> = emptyList(),
     val albums: List<AlbumEntity> = emptyList(),
-    val loading: Boolean = false,
     val loadingMore: Boolean = false,
     val syncing: Boolean = false,
-    /** multi-select state; null = selection mode off. */
+    /** Non-null = multi-select mode active with these message ids. */
     val selected: Set<Long>? = null,
+    /** 0 = main gallery; otherwise the open album topic id. */
+    val openTopicId: Long = 0L,
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -74,10 +79,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val toasts: SharedFlow<String> = _toasts.asSharedFlow()
 
     private var client: TgClient? = null
-    private var savedChatId = 0L
     private var oldestLoaded = Long.MAX_VALUE
     private var started = false
-    private var viewingTopic = 0L // 0 = main gallery
 
     val autoBackup = settings.autoBackup
     val wifiOnly = settings.wifiOnly
@@ -85,6 +88,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val backupFolders = settings.backupFolders
     val dedupeEnabled = settings.dedupeEnabled
 
+    /** Start (or restart after credentials change) the TDLib client + collectors. */
     fun start() {
         if (started) return
         started = true
@@ -103,67 +107,54 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     return@launch
                 }
 
-            // observe Room cache -> gallery
-            launch {
-                dao.observeMainItems().collect { entities ->
-                    if (viewingTopic == 0L) {
-                        _gallery.value = _gallery.value.copy(items = entities.map(::toItem))
-                    }
-                }
-            }
-            launch {
-                dao.observeAlbums().collect { albums ->
-                    _gallery.value = _gallery.value.copy(albums = albums)
-                }
-            }
-            launch {
-                dao.observeTopic(viewingTopic).collect { entities ->
-                    if (viewingTopic != 0L) {
-                        _gallery.value = _gallery.value.copy(items = entities.map(::toItem))
-                    }
-                }
-            }
-
-            // drive auth UI from authorization state
-            c.updates
-                .filterIsInstance<TdApi.UpdateAuthorizationState>()
-                .map { it.authorizationState }
-                .collect { state ->
-                    when (state) {
-                        is TdApi.AuthorizationStateWaitTdlibParameters -> runCatching { c.start() }
-                        is TdApi.AuthorizationStateWaitPhoneNumber -> _auth.value = AuthUi.Phone
-                        is TdApi.AuthorizationStateWaitCode -> _auth.value =
-                            AuthUi.Code(describeCode(state.codeInfo))
-                        is TdApi.AuthorizationStateWaitPassword -> _auth.value =
-                            AuthUi.Password(state.passwordHint.orEmpty())
-                        is TdApi.AuthorizationStateWaitRegistration -> _auth.value = AuthUi.Registration
-                        is TdApi.AuthorizationStateReady -> {
-                            _auth.value = AuthUi.Ready
-                            runCatching {
-                                savedChatId = c.savedMessagesChatId()
-                                syncHistory()
-                                syncAlbums()
-                            }
-                        }
-                        else -> Unit
-                    }
-                }
+            observeGallery()
+            collectAuthStates(c)
         }
     }
 
-    private fun toItem(e: ItemEntity) = StashItem(
-        messageId = e.messageId,
-        date = e.date,
-        chatId = e.chatId,
-        fileId = e.fileId,
-        fileName = e.fileName,
-        sizeBytes = e.sizeBytes,
-        isVideo = e.isVideo,
-        localPath = e.localPath,
-        deviceUri = e.deviceUri,
-        topicId = e.topicId,
-        phash = e.phash,
-    )
+    /** Room -> UI. flatMapLatest so switching albums re-subscribes correctly. */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private fun observeGallery() {
+        viewModelScope.launch {
+            _gallery.flatMapLatest { g ->
+                if (g.openTopicId == 0L) dao.observeMainItems() else dao.observeTopic(g.openTopicId)
+            }.collect { entities ->
+                _gallery.value = _gallery.value.copy(items = entities.map { it.toStashItem() })
+                val min = entities.minOfOrNull { it.messageId } ?: Long.MAX_VALUE
+                if (min < oldestLoaded) oldestLoaded = min
+            }
+        }
+        viewModelScope.launch {
+            dao.observeAlbums().collect { albums ->
+                _gallery.value = _gallery.value.copy(albums = albums)
+            }
+        }
+    }
+
+    private suspend fun collectAuthStates(c: TgClient) {
+        c.updates
+            .filterIsInstance<TdApi.UpdateAuthorizationState>()
+            .map { it.authorizationState }
+            .collect { state ->
+                when (state) {
+                    is TdApi.AuthorizationStateWaitTdlibParameters ->
+                        runCatching { c.start() }
+                    is TdApi.AuthorizationStateWaitPhoneNumber ->
+                        _auth.value = AuthUi.Phone
+                    is TdApi.AuthorizationStateWaitCode ->
+                        _auth.value = AuthUi.Code(describeCode(state.codeInfo))
+                    is TdApi.AuthorizationStateWaitPassword ->
+                        _auth.value = AuthUi.Password(state.passwordHint.orEmpty())
+                    is TdApi.AuthorizationStateWaitRegistration ->
+                        _auth.value = AuthUi.Registration
+                    is TdApi.AuthorizationStateReady -> {
+                        _auth.value = AuthUi.Ready
+                        runCatching { syncAll() }
+                    }
+                    else -> Unit
+                }
+            }
+    }
 
     private fun describeCode(info: TdApi.AuthenticationCodeInfo): String = when (val t = info.type) {
         is TdApi.AuthenticationCodeTypeTelegramMessage ->
@@ -186,65 +177,52 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         settings.setCredentials(id, apiHash.trim())
         _toasts.tryEmit("Saved. Starting Telegram client...")
+
+        // recreate the client and wire everything up again via start()
         TgClient.shutdown()
+        client = null
+        started = false
         _auth.value = AuthUi.Loading
-        val c = TgClient.getOrCreate(getApplication(), id, apiHash.trim())
-        client = c
-        runCatching { c.start() }
-            .onFailure { e -> _toasts.tryEmit("TDLib init failed: ${e.message}") }
+        start()
     }
 
     // ---------- auth actions ----------
 
-    fun submitPhone(phone: String) = vmIo { c -> c.setPhone(phone.trim()) }
-    fun submitCode(code: String) = vmIo { c -> c.checkCode(code.trim()) }
-    fun submitPassword(pw: String) = vmIo { c -> c.checkPassword(pw) }
-    fun submitRegistration(name: String) = vmIo { c -> c.registerUser(name.trim()) }
+    fun submitPhone(phone: String) = vmIo { it.setPhone(phone.trim()) }
+    fun submitCode(code: String) = vmIo { it.checkCode(code.trim()) }
+    fun submitPassword(pw: String) = vmIo { it.checkPassword(pw) }
+    fun submitRegistration(name: String) = vmIo { it.registerUser(name.trim()) }
 
     private fun vmIo(block: suspend (TgClient) -> Unit) {
         val c = client ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { block(c) }.onFailure { e -> _toasts.tryEmit(authError(e)) }
+            runCatching { block(c) }.onFailure { e -> _toasts.tryEmit(userError(e)) }
         }
     }
 
-    private fun authError(e: Throwable): String {
+    private fun userError(e: Throwable): String {
         val msg = e.message ?: "unknown error"
-        return if (e is TdException && e.isFloodWait) "Too many attempts. Wait ${e.floodWaitSeconds}s"
+        return if (e is TdException && e.isFloodWait)
+            "Too many attempts. Wait ${e.floodWaitSeconds}s"
         else "Error: $msg"
     }
 
     // ---------- gallery sync ----------
 
-    fun refresh() {
-        if (_auth.value is AuthUi.Ready) {
-            viewModelScope.launch(Dispatchers.IO) {
-                dao.clear()
-                oldestLoaded = Long.MAX_VALUE
-                syncHistory()
-                syncAlbums()
-            }
-        }
-    }
-
-    private suspend fun syncHistory() {
+    private suspend fun syncAll() {
         val c = client ?: return
         _gallery.value = _gallery.value.copy(syncing = true)
         try {
             var fromId = 0L
             val fetched = mutableListOf<ItemEntity>()
-            while (true) {
-                val page = c.history(savedChatId, fromId, 100)
+            while (fetched.size < 1000) {
+                val page = c.history(fromId, 100)
                 if (page.messages.isEmpty()) break
-                fetched.addAll(page.messages.mapNotNull(::msgToEntity))
+                fetched.addAll(page.messages.mapNotNull { messageToEntity(it) })
                 fromId = page.messages.last().id
-                if (fetched.size >= 1000) break
             }
-            if (fetched.isNotEmpty()) dao.upsertAll(fetched)
-            if (fetched.isNotEmpty()) {
-                val minId = fetched.minOf { it.messageId }
-                if (minId < oldestLoaded) oldestLoaded = minId
-            }
+            dao.upsertAll(fetched)
+            syncAlbums()
         } catch (_: Exception) {
         } finally {
             _gallery.value = _gallery.value.copy(syncing = false)
@@ -255,52 +233,29 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val c = client ?: return
         runCatching {
             val topics = c.loadTopics()
-            val albums = topics.mapNotNull { t ->
-                val name = when (val ty = t.type) {
-                    else -> "Album ${t.id}"
-                }
-                AlbumEntity(topicId = t.id, name = name, order = t.order)
-            }
-            dao.upsertAlbums(albums)
-            // sync each topic's items into Room
+            dao.upsertAlbums(
+                topics.map { AlbumEntity(topicId = it.id, name = "Album ${it.id}", order = it.order) }
+            )
             for (t in topics) {
                 runCatching {
                     val msgs = c.topicHistory(t.id, 0L, 100)
-                    dao.upsertAll(msgs.messages.mapNotNull(::msgToEntity).map { e ->
-                        e.copy(topicId = t.id)
-                    })
+                    dao.upsertAll(msgs.messages.mapNotNull { messageToEntity(it, topicId = t.id) })
                 }
             }
         }
     }
 
-    private fun msgToEntity(m: TdApi.Message): ItemEntity? {
-        val item = StashItem.fromMessage(m) ?: return null
-        return ItemEntity(
-            messageId = item.messageId,
-            chatId = item.chatId,
-            date = item.date,
-            fileId = item.fileId,
-            fileName = item.fileName,
-            sizeBytes = item.sizeBytes,
-            isVideo = item.isVideo,
-            localPath = item.localPath,
-            deviceUri = null,
-            topicId = 0L,
-        )
-    }
-
     fun loadMore() {
         val cur = _gallery.value
-        if (cur.loadingMore || oldestLoaded == Long.MAX_VALUE || client == null) return
-        if (savedChatId == 0L || viewingTopic != 0L) return
+        if (cur.loadingMore || cur.openTopicId != 0L) return
+        if (oldestLoaded == Long.MAX_VALUE || client == null) return
         _gallery.value = cur.copy(loadingMore = true)
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val page = client!!.history(savedChatId, oldestLoaded, 100)
+                val page = client!!.history(oldestLoaded, 100)
                 val entities = page.messages
                     .filter { it.id < oldestLoaded }
-                    .mapNotNull(::msgToEntity)
+                    .mapNotNull { messageToEntity(it) }
                 if (entities.isNotEmpty()) {
                     dao.upsertAll(entities)
                     oldestLoaded = entities.minOf { it.messageId }
@@ -315,26 +270,26 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- albums ----------
 
     fun openTopic(topicId: Long) {
-        viewingTopic = topicId
-        viewModelScope.launch(Dispatchers.IO) {
-            if (topicId != 0L) {
+        _gallery.value = _gallery.value.copy(openTopicId = topicId, selected = null)
+        if (topicId != 0L) {
+            viewModelScope.launch(Dispatchers.IO) {
                 val c = client ?: return@launch
                 runCatching {
                     val msgs = c.topicHistory(topicId, 0L, 100)
-                    dao.upsertAll(msgs.messages.mapNotNull(::msgToEntity).map { it.copy(topicId = topicId) })
+                    dao.upsertAll(msgs.messages.mapNotNull { messageToEntity(it, topicId) })
                 }
             }
         }
     }
 
     fun closeTopic() {
-        viewingTopic = 0L
+        _gallery.value = _gallery.value.copy(openTopicId = 0L, selected = null)
     }
 
     fun createAlbum(name: String) = viewModelScope.launch(Dispatchers.IO) {
         val c = client ?: return@launch
         runCatching {
-            val id = c.ensureAlbumTopic(name)
+            val id = c.createAlbumTopic(name)
             dao.upsertAlbums(listOf(AlbumEntity(id, name, System.currentTimeMillis())))
             _toasts.tryEmit("Album \"$name\" created")
         }.onFailure { e -> _toasts.tryEmit("Could not create album: ${e.message}") }
@@ -343,42 +298,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteAlbum(topicId: Long) = viewModelScope.launch(Dispatchers.IO) {
         val c = client ?: return@launch
         runCatching {
-            // delete all messages in topic then drop the album row
             val msgs = c.topicHistory(topicId, 0L, 100)
             if (msgs.messages.isNotEmpty()) {
-                c.deleteMessages(savedChatId, msgs.messages.map { it.id }.toLongArray())
+                c.deleteMessages(
+                    msgs.messages.first().chatId,
+                    msgs.messages.map { it.id }.toLongArray()
+                )
             }
             dao.deleteAlbum(topicId)
-            val itemsInTopic = dao.observeTopic(topicId).first()
-            dao.deleteAll(itemsInTopic.map { it.messageId })
             _toasts.tryEmit("Album deleted")
         }.onFailure { e -> _toasts.tryEmit("Could not delete album: ${e.message}") }
     }
 
-    /** Add currently selected items to an album (existing or new). */
+    /** Add currently selected items to an album (existing or newly created). */
     fun addSelectedToAlbum(albumTopicId: Long, newAlbumName: String?) =
         viewModelScope.launch(Dispatchers.IO) {
             val c = client ?: return@launch
             val sel = _gallery.value.selected ?: return@launch
             if (sel.isEmpty()) return@launch
             runCatching {
-                val topicId = if (newAlbumName != null) c.ensureAlbumTopic(newAlbumName) else albumTopicId
+                val topicId = newAlbumName?.let { c.createAlbumTopic(it) } ?: albumTopicId
                 val moved = c.moveToTopic(sel.toLongArray(), topicId)
-                // update Room: re-key under topic
                 dao.deleteAll(sel.toList())
-                val entities = moved.mapNotNull { m ->
-                    StashItem.fromMessage(m)?.let {
-                        ItemEntity(
-                            messageId = it.messageId, chatId = it.chatId, date = it.date,
-                            fileId = it.fileId, fileName = it.fileName, sizeBytes = it.sizeBytes,
-                            isVideo = it.isVideo, localPath = it.localPath, deviceUri = null,
-                            topicId = topicId
-                        )
-                    }
-                }
-                dao.upsertAll(entities)
+                dao.upsertAll(moved.mapNotNull { messageToEntity(it, topicId = topicId) })
                 if (newAlbumName != null) {
-                    dao.upsertAlbums(listOf(AlbumEntity(topicId, newAlbumName, System.currentTimeMillis())))
+                    dao.upsertAlbums(
+                        listOf(AlbumEntity(topicId, newAlbumName, System.currentTimeMillis()))
+                    )
                 }
                 _toasts.tryEmit("Added to album")
             }.onFailure { e -> _toasts.tryEmit("Move failed: ${e.message}") }
@@ -390,7 +336,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleSelect(id: Long) {
         val cur = _gallery.value
         val sel = cur.selected ?: return
-        _gallery.value = cur.copy(selected = (sel + id).let { if (id in sel) it - id else it })
+        _gallery.value = cur.copy(selected = if (id in sel) sel - id else sel + id)
     }
 
     fun enterSelection(id: Long) {
@@ -410,117 +356,106 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun upload(uris: List<Uri>, topicId: Long = 0L) = viewModelScope.launch(Dispatchers.IO) {
         val c = client ?: return@launch
         val dedupe = settings.dedupeEnabled.first()
-        var ok = 0
-        var skipped = 0
-        var fail = 0
+        var ok = 0; var skipped = 0; var failed = 0
         for (uri in uris) {
             try {
                 val staged = stageUri(uri) ?: error("Cannot open selected file")
-                if (dedupe && checkDuplicate(staged)) {
+                val phash = if (dedupe && !looksLikeVideo(staged.name)) {
+                    PerceptualHash.compute(staged) ?: 0L
+                } else 0L
+
+                if (phash != 0L && dao.allPhashes().any { PerceptualHash.isProbablyDuplicate(it, phash) }) {
                     staged.delete()
                     skipped++
                     continue
                 }
+
                 val msg = c.uploadDocument(staged.absolutePath, staged.name, topicId)
                 StashItem.fromMessage(msg)?.let {
-                    dao.upsertAll(
-                        listOf(
-                            ItemEntity(
-                                messageId = it.messageId, chatId = it.chatId, date = it.date,
-                                fileId = it.fileId, fileName = it.fileName, sizeBytes = it.sizeBytes,
-                                isVideo = it.isVideo, localPath = staged.absolutePath,
-                                deviceUri = uri.toString(), topicId = topicId,
-                                phash = PerceptualHash.compute(staged) ?: 0L
-                            )
-                        )
-                    )
+                    dao.upsertAll(listOf(it.toEntity(deviceUri = uri.toString(), phash = phash)))
                 }
                 staged.delete()
                 ok++
             } catch (_: Exception) {
-                fail++
+                failed++
             }
         }
         _toasts.tryEmit(
             when {
-                skipped > 0 && fail > 0 -> "Uploaded $ok, skipped $skipped duplicates, failed $fail"
+                skipped > 0 && failed > 0 -> "Uploaded $ok, skipped $skipped duplicates, failed $failed"
                 skipped > 0 -> "Uploaded $ok, skipped $skipped duplicates"
-                fail > 0 -> "Uploaded $ok, failed $fail"
+                failed > 0 -> "Uploaded $ok, failed $failed"
                 else -> "Uploaded $ok file(s)"
             }
         )
     }
 
-    private suspend fun checkDuplicate(staged: File): Boolean {
-        val hash = PerceptualHash.compute(staged) ?: return false
-        val existing = dao.allPhashes()
-        return existing.any { PerceptualHash.isProbablyDuplicate(it.phash, hash) }
-    }
-
+    /** Copy a content uri into the cache dir so TDLib can send it by local path. */
     private fun stageUri(uri: Uri): File? {
         val resolver = getApplication<Application>().contentResolver
         val name = queryDisplayName(resolver, uri)
             ?: "photo_${System.currentTimeMillis()}.jpg"
+        // disambiguate same-named picks within one session
         val dir = File(getApplication<Application>().cacheDir, "upload").apply { mkdirs() }
-        val staged = File(dir, name)
-        resolver.openInputStream(uri)?.use { input ->
+        val staged = File(dir, "${System.currentTimeMillis()}_$name")
+        return resolver.openInputStream(uri)?.use { input ->
             staged.outputStream().use { input.copyTo(it) }
-        } ?: return null
-        return staged
+            staged
+        }
     }
 
     private fun queryDisplayName(resolver: android.content.ContentResolver, uri: Uri): String? =
         resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
             ?.use { csr -> if (csr.moveToFirst()) csr.getString(0) else null }
 
-    // ---------- item actions ----------
-
-    fun download(item: StashItem) = viewModelScope.launch(Dispatchers.IO) {
-        val c = client ?: return@launch
-        runCatching {
-            val path = c.download(item.fileId)
-            saveToGallery(File(path), item.fileName, item.isVideo)
-        }.onSuccess { _toasts.tryEmit("Saved to gallery") }
-            .onFailure { e -> _toasts.tryEmit("Download failed: ${e.message}") }
+    private fun looksLikeVideo(name: String) = when {
+        name.endsWith(".mp4", true) || name.endsWith(".mov", true)
+            || name.endsWith(".mkv", true) || name.endsWith(".avi", true)
+            || name.endsWith(".webm", true) -> true
+        else -> false
     }
 
-    fun downloadSelected() = viewModelScope.launch(Dispatchers.IO) {
+    // ---------- item actions ----------
+
+    fun download(item: StashItem) = downloadItems(listOf(item))
+
+    fun downloadSelected() {
+        val sel = _gallery.value.selected ?: return
+        val items = _gallery.value.items.filter { it.messageId in sel }
+        downloadItems(items) // exits selection mode when done
+    }
+
+    private fun downloadItems(items: List<StashItem>) = viewModelScope.launch(Dispatchers.IO) {
         val c = client ?: return@launch
-        val sel = _gallery.value.selected ?: return@launch
         var ok = 0
-        for (id in sel) {
-            val item = _gallery.value.items.find { it.messageId == id } ?: continue
+        for (item in items) {
             runCatching {
                 val path = c.download(item.fileId)
                 saveToGallery(File(path), item.fileName, item.isVideo)
                 ok++
             }
         }
-        _toasts.tryEmit("Saved $ok to gallery")
+        _toasts.tryEmit(if (items.size == 1) "Saved to gallery" else "Saved $ok to gallery")
         exitSelectionMode()
     }
 
-    fun delete(item: StashItem) = viewModelScope.launch(Dispatchers.IO) {
-        val c = client ?: return@launch
-        runCatching { c.deleteMessages(item.chatId, longArrayOf(item.messageId)) }
-            .onSuccess {
-                dao.deleteAll(listOf(item.messageId))
-                _toasts.tryEmit("Deleted")
-            }
-            .onFailure { e -> _toasts.tryEmit("Delete failed: ${e.message}") }
+    fun delete(item: StashItem) = deleteItems(listOf(item))
+
+    fun deleteSelected() {
+        val sel = _gallery.value.selected ?: return
+        val items = _gallery.value.items.filter { it.messageId in sel }
+        deleteItems(items)
     }
 
-    fun deleteSelected() = viewModelScope.launch(Dispatchers.IO) {
+    private fun deleteItems(items: List<StashItem>) = viewModelScope.launch(Dispatchers.IO) {
         val c = client ?: return@launch
-        val sel = _gallery.value.selected ?: return@launch
-        val items = _gallery.value.items.filter { it.messageId in sel }
+        if (items.isEmpty()) return@launch
         runCatching {
-            // group by chat (Saved Messages is one chat, but be safe)
             items.groupBy { it.chatId }.forEach { (chat, list) ->
                 c.deleteMessages(chat, list.map { it.messageId }.toLongArray())
             }
-            dao.deleteAll(sel.toList())
-            _toasts.tryEmit("Deleted ${sel.size} item(s)")
+            dao.deleteAll(items.map { it.messageId })
+            _toasts.tryEmit(if (items.size == 1) "Deleted" else "Deleted ${items.size} item(s)")
         }.onFailure { e -> _toasts.tryEmit("Delete failed: ${e.message}") }
         exitSelectionMode()
     }
@@ -534,10 +469,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-                put(
-                    MediaStore.MediaColumns.MIME_TYPE,
-                    if (isVideo) "video/mp4" else guessMime(displayName)
-                )
+                put(MediaStore.MediaColumns.MIME_TYPE, if (isVideo) "video/mp4" else guessMime(displayName))
             }
             val uri = app.contentResolver.insert(collection, values)
                 ?: error("Could not create MediaStore entry")
@@ -595,8 +527,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun backupNow() {
-        val wm = WorkManager.getInstance(getApplication())
-        wm.enqueueUniqueWork(
+        WorkManager.getInstance(getApplication()).enqueueUniqueWork(
             "telestash-backup-now",
             ExistingWorkPolicy.REPLACE,
             OneTimeWorkRequestBuilder<BackupWorker>().build()
@@ -607,6 +538,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         client?.logout()
         dao.clear()
         TgClient.shutdown()
+        client = null
+        oldestLoaded = Long.MAX_VALUE
+        _gallery.value = GalleryUi()
         _auth.value = AuthUi.Loading
     }
 }

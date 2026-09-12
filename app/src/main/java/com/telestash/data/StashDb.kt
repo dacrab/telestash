@@ -38,22 +38,14 @@ data class AlbumEntity(
 
 @Dao
 interface ItemDao {
-    @Query("SELECT * FROM items ORDER BY date DESC, messageId DESC")
-    fun observeAll(): Flow<List<ItemEntity>>
-
     @Query("SELECT * FROM items WHERE topicId = 0 ORDER BY date DESC, messageId DESC")
     fun observeMainItems(): Flow<List<ItemEntity>>
 
     @Query("SELECT * FROM items WHERE topicId = :topicId ORDER BY date DESC, messageId DESC")
     fun observeTopic(topicId: Long): Flow<List<ItemEntity>>
 
-    @Query("SELECT * FROM items WHERE phash = :hash AND phash != 0 LIMIT 1")
-    suspend fun findByPhash(hash: Long): ItemEntity?
-
-    @Query("SELECT messageId, phash FROM items WHERE phash != 0")
-    suspend fun allPhashes(): List<PhashRow>
-
-    data class PhashRow(val messageId: Long, val phash: Long)
+    @Query("SELECT phash FROM items WHERE phash != 0")
+    suspend fun allPhashes(): List<Long>
 
     @Query("SELECT COUNT(*) FROM items WHERE deviceUri = :uri")
     suspend fun countByDeviceUri(uri: String): Int

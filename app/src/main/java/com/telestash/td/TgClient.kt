@@ -8,14 +8,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
-import java.util.concurrent.ConcurrentHashMap
 
 class TdException(val code: Int, override val message: String) : Exception(message) {
     val isFloodWait: Boolean get() = message.startsWith("FLOOD_WAIT_")
@@ -27,22 +28,22 @@ class TdException(val code: Int, override val message: String) : Exception(messa
 
 /**
  * Coroutines wrapper around TDLib with a re-usable update stream.
- * Single instance per app process; photos are sent as documents (lossless).
+ * Process-wide singleton; media is sent as documents (lossless).
  */
 class TgClient private constructor(
     private val tdlibDir: String,
     private val apiId: Int,
     private val apiHash: String,
-    dbKey: ByteArray,
+    private val dbKey: ByteArray,
 ) {
     companion object {
+        private const val APP_VERSION = "0.3.0"
+        private const val TOPICS_COLLECTION_TIMEOUT_MS = 1_000L
+
         @Volatile private var instance: TgClient? = null
-        @Volatile var started = false
-            private set
 
         fun getOrCreate(context: Context, apiId: Int, apiHash: String): TgClient =
             instance ?: synchronized(this) {
-                if (instance == null) started = false
                 instance ?: TgClient(
                     context.getDir("tdlib", Context.MODE_PRIVATE).absolutePath,
                     apiId,
@@ -59,7 +60,6 @@ class TgClient private constructor(
                 c.scope.cancel()
             }
             instance = null
-            started = false
         }
     }
 
@@ -72,13 +72,14 @@ class TgClient private constructor(
     )
     val updates: SharedFlow<TdApi.Update> = _updates.asSharedFlow()
 
-    private val pending = ConcurrentHashMap<Unit, CompletableDeferred<TdApi.Object>>()
+    /** True after SetTdlibParameters succeeded; TDLib is then authorized-restorable. */
+    @Volatile var isStarted = false
+        private set
+
+    private var cachedChatId = 0L
+
     internal val native: Client = Client.create(
-        { update ->
-            if (update is TdApi.Update) {
-                scope.launch { _updates.emit(update) }
-            }
-        },
+        { update -> if (update is TdApi.Update) scope.launch { _updates.emit(update) } },
         { /* update handler exception */ },
         { /* default exception */ }
     )
@@ -87,30 +88,28 @@ class TgClient private constructor(
         runCatching { Client.execute(TdApi.SetLogVerbosityLevel(1)) }
     }
 
-    /** Send SetTdlibParameters; safe to call exactly once per client lifetime. */
+    /** Configure TDLib; safe to call exactly once per client instance. */
     suspend fun start() {
         send(
             TdApi.SetTdlibParameters(
-                false,
+                false,              // useTestDc
                 tdlibDir,
                 "$tdlibDir/files",
-                dbEncryptionKey,
-                true,   // file db
-                true,   // chat info db
-                true,   // message db
-                false,  // secret chats
+                dbKey,
+                true,               // useFileDatabase
+                true,               // useChatInfoDatabase
+                true,               // useMessageDatabase
+                false,              // useSecretChats
                 apiId,
                 apiHash,
                 "en",
                 android.os.Build.MODEL,
                 android.os.Build.VERSION.RELEASE,
-                "0.2.0"
+                APP_VERSION,
             )
         )
-        started = true
+        isStarted = true
     }
-
-    private val dbEncryptionKey: ByteArray = dbKey
 
     // ---------- auth ----------
 
@@ -128,37 +127,33 @@ class TgClient private constructor(
     suspend fun checkCode(code: String) = send(TdApi.CheckAuthenticationCode(code))
     suspend fun checkPassword(pw: String) = send(TdApi.CheckAuthenticationPassword(pw))
     suspend fun registerUser(firstName: String) = send(TdApi.RegisterUser(firstName, "", false))
+
     suspend fun logout() {
+        cachedChatId = 0L
         runCatching { send(TdApi.LogOut()) }
     }
 
     // ---------- messaging ----------
 
-    /** Resolve Saved Messages chat: my_id -> createPrivateChat(force). */
+    /** Saved Messages chat id, resolved once via my_id -> createPrivateChat(force). */
     suspend fun savedMessagesChatId(): Long {
+        if (cachedChatId != 0L) return cachedChatId
         val myId = (send(TdApi.GetOption("my_id")) as TdApi.OptionValueInteger).value
-        return send(TdApi.CreatePrivateChat(myId, true)).id
+        cachedChatId = send(TdApi.CreatePrivateChat(myId, true)).id
+        return cachedChatId
     }
 
     /**
-     * Ensure an album topic exists in Saved Messages: forward a message to the main
-     * Saved Messages chat with a MessageTopicSavedMessages id? Not possible to create
-     * arbitrary topics via dedicated method; topics are created implicitly by sending
-     * a message into a topic id. Telegram derives topic ids from the forwarded-from
-     * chat, so custom "album" topics work via tags-lite: we instead create topics by
-     * sending a message with topicId = MessageTopicSavedMessages(newId) where newId is
-     * derived from time. The update updateSavedMessagesTopic then confirms it.
+     * Create an album topic. Saved Messages topics are created implicitly by sending
+     * the first message into a MessageTopicSavedMessages id; the server confirms via
+     * updateSavedMessagesTopic. Returns the topic id used.
      */
-    suspend fun ensureAlbumTopic(albumName: String): Long {
-        val chatId = savedMessagesChatId()
-        // topic ids in Saved Messages are derived from chat_id of origin; for
-        // client-created topics we use a locally-generated id and let the server
-        // confirm via updateSavedMessagesTopic (guaranteed before result returns).
-        val probeId = System.currentTimeMillis()
+    suspend fun createAlbumTopic(albumName: String): Long {
+        val topicId = System.currentTimeMillis()
         send(
             TdApi.SendMessage(
-                chatId,
-                TdApi.MessageTopicSavedMessages(probeId),
+                savedMessagesChatId(),
+                TdApi.MessageTopicSavedMessages(topicId),
                 null, null, null,
                 TdApi.InputMessageText(
                     TdApi.FormattedText("telestash-album:$albumName", arrayOf()),
@@ -166,36 +161,40 @@ class TgClient private constructor(
                 )
             )
         )
-        return probeId
+        return topicId
     }
 
-    /** List Saved Messages topics (albums) via LoadSavedMessagesTopics + updates. */
+    /** List Saved Messages topics; they arrive via updateSavedMessagesTopic. */
     suspend fun loadTopics(): List<TdApi.SavedMessagesTopic> {
         val collected = mutableListOf<TdApi.SavedMessagesTopic>()
-        val collector = CoroutineScope(Dispatchers.IO)
-        val job = collector.launch {
-            updates
-                .filterIsInstance<TdApi.UpdateSavedMessagesTopic>()
-                .collect { u -> collected.add(u.topic) }
+        coroutineScopeRun { collector ->
+            collector.launch {
+                updates
+                    .filterIsInstance<TdApi.UpdateSavedMessagesTopic>()
+                    .collect { u -> collected.add(u.topic) }
+            }
+            // 404 means "all loaded" — expected terminal state
+            runCatching { send(TdApi.LoadSavedMessagesTopics(100)) }
+            withTimeoutOrNull(TOPICS_COLLECTION_TIMEOUT_MS) { delay(Long.MAX_VALUE) }
         }
-        runCatching { send(TdApi.LoadSavedMessagesTopics(100)) }
-        kotlinx.coroutines.delay(700)
-        job.cancel()
-        collector.cancel()
         return collected.distinctBy { it.id }
     }
 
+    private suspend fun coroutineScopeRun(block: suspend (CoroutineScope) -> Unit) {
+        val s = CoroutineScope(Dispatchers.IO)
+        try {
+            block(s)
+        } finally {
+            s.cancel()
+        }
+    }
+
     /** Upload a file losslessly as document, optionally into an album topic. */
-    suspend fun uploadDocument(
-        path: String,
-        fileName: String,
-        topicId: Long = 0L,
-    ): TdApi.Message {
-        val chatId = savedMessagesChatId()
+    suspend fun uploadDocument(path: String, fileName: String, topicId: Long = 0L): TdApi.Message {
         val topic = if (topicId > 0) TdApi.MessageTopicSavedMessages(topicId) else null
         return send(
             TdApi.SendMessage(
-                chatId,
+                savedMessagesChatId(),
                 topic,
                 null, null, null,
                 TdApi.InputMessageDocument(
@@ -206,7 +205,7 @@ class TgClient private constructor(
         )
     }
 
-    /** Move messages (photos) into an album topic. */
+    /** Move messages into an album topic: forward as copies, then delete originals. */
     suspend fun moveToTopic(messageIds: LongArray, topicId: Long): List<TdApi.Message> {
         val chatId = savedMessagesChatId()
         val res = send(
@@ -217,7 +216,7 @@ class TgClient private constructor(
                 messageIds,
                 null,
                 true,   // send copy
-                false
+                false,  // keep captions
             )
         )
         send(TdApi.DeleteMessages(chatId, messageIds, true))
@@ -225,14 +224,14 @@ class TgClient private constructor(
     }
 
     /** Newest-first history page of Saved Messages. */
-    suspend fun history(chatId: Long, fromMessageId: Long, limit: Int): TdApi.Messages =
-        send(TdApi.GetChatHistory(chatId, fromMessageId, 0, limit, false))
+    suspend fun history(fromMessageId: Long, limit: Int): TdApi.Messages =
+        send(TdApi.GetChatHistory(savedMessagesChatId(), fromMessageId, 0, limit, false))
 
     /** Newest-first history page of a Saved Messages topic (album). */
     suspend fun topicHistory(topicId: Long, fromMessageId: Long, limit: Int): TdApi.Messages =
         send(TdApi.GetSavedMessagesTopicHistory(topicId, fromMessageId, 0, limit))
 
-    /** Download a file synchronously (priority 16); returns local path. */
+    /** Download a file synchronously (priority 16); returns the local path. */
     suspend fun download(fileId: Int): String =
         send(TdApi.DownloadFile(fileId, 16, 0, 0, true)).local.path
 

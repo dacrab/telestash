@@ -5,6 +5,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.telestash.AppViewModel
@@ -46,8 +47,8 @@ fun AddToAlbumDialog(
     albums: List<AlbumEntity>,
     onDismiss: () -> Unit,
 ) {
-    var newAlbumName by remember { mutableStateOf<String?>(null) }
-    val chosenExisting = remember { mutableStateOf<Long?>(null) }
+    var newAlbumName by remember { mutableStateOf("") }
+    var chosenExisting by remember { mutableStateOf<Long?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -60,13 +61,13 @@ fun AddToAlbumDialog(
                     LazyColumn(Modifier.heightIn(max = 300.dp)) {
                         items(albums, key = { it.topicId }) { album ->
                             Row(
-                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(album.name, Modifier.weight(1f))
                                 RadioButton(
-                                    selected = chosenExisting.value == album.topicId,
-                                    onClick = { chosenExisting.value = album.topicId }
+                                    selected = chosenExisting == album.topicId,
+                                    onClick = { chosenExisting = album.topicId }
                                 )
                             }
                         }
@@ -74,8 +75,8 @@ fun AddToAlbumDialog(
                 }
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
-                    value = newAlbumName ?: "",
-                    onValueChange = { newAlbumName = it.ifBlank { null } },
+                    value = newAlbumName,
+                    onValueChange = { newAlbumName = it },
                     label = { Text("...or new album name") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
@@ -84,11 +85,11 @@ fun AddToAlbumDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = chosenExisting.value != null || !newAlbumName.isNullOrBlank(),
+                enabled = chosenExisting != null || newAlbumName.isNotBlank(),
                 onClick = {
                     vm.addSelectedToAlbum(
-                        albumTopicId = chosenExisting.value ?: 0L,
-                        newAlbumName = newAlbumName?.takeIf { it.isNotBlank() }
+                        albumTopicId = chosenExisting ?: 0L,
+                        newAlbumName = newAlbumName.takeIf { it.isNotBlank() }
                     )
                     onDismiss()
                 }

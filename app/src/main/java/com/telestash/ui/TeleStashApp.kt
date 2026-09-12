@@ -41,13 +41,14 @@ fun TeleStashApp(vm: AppViewModel, authState: androidx.compose.runtime.State<Aut
     var showSettings by remember { mutableStateOf(false) }
     var showNewAlbum by remember { mutableStateOf(false) }
     var showAddToAlbum by remember { mutableStateOf(false) }
-    var inAlbum by remember { mutableStateOf<Long?>(null) } // open album topic or null
+    val openTopicId = gallery.openTopicId
 
     LaunchedEffect(vm) {
         vm.toasts.collectLatest { snackbar.showSnackbar(it) }
     }
 
     val selecting = gallery.selected != null
+    val inAlbum = openTopicId != 0L
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
@@ -61,12 +62,12 @@ fun TeleStashApp(vm: AppViewModel, authState: androidx.compose.runtime.State<Aut
                     onDownload = { vm.downloadSelected() },
                     onDelete = { vm.deleteSelected() },
                 )
-            } else if (inAlbum != null) {
-                val album = gallery.albums.find { it.topicId == inAlbum }
+            } else if (inAlbum) {
+                val album = gallery.albums.find { it.topicId == openTopicId }
                 TopAppBar(
                     title = { Text(album?.name ?: "Album") },
                     navigationIcon = {
-                        IconButton(onClick = { inAlbum = null; vm.closeTopic() }) {
+                        IconButton(onClick = { vm.closeTopic() }) {
                             Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                         }
                     }
@@ -95,7 +96,7 @@ fun TeleStashApp(vm: AppViewModel, authState: androidx.compose.runtime.State<Aut
                 val picker = rememberLauncherForActivityResult(
                     ActivityResultContracts.PickMultipleVisualMedia(20)
                 ) { uris ->
-                    if (uris.isNotEmpty()) vm.upload(uris, inAlbum ?: 0L)
+                    if (uris.isNotEmpty()) vm.upload(uris, openTopicId)
                 }
                 ExtendedFloatingActionButton(
                     onClick = {
@@ -104,7 +105,7 @@ fun TeleStashApp(vm: AppViewModel, authState: androidx.compose.runtime.State<Aut
                         )
                     },
                     icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-                    text = { Text(if (inAlbum != null) "Add to album" else "Upload") }
+                    text = { Text(if (inAlbum) "Add to album" else "Upload") }
                 )
             }
         }
@@ -121,9 +122,9 @@ fun TeleStashApp(vm: AppViewModel, authState: androidx.compose.runtime.State<Aut
                 AuthScreen(vm, s)
 
             AuthUi.Ready -> GalleryScreen(
-                vm, gallery, inAlbum, padding,
+                vm, gallery, openTopicId, padding,
                 onItemClick = { viewer = it },
-                onOpenAlbum = { id -> inAlbum = id; vm.openTopic(id) },
+                onOpenAlbum = { vm.openTopic(it) },
             )
         }
     }
@@ -174,7 +175,7 @@ private fun SelectionTopBar(
 private fun GalleryScreen(
     vm: AppViewModel,
     gallery: GalleryUi,
-    inAlbum: Long?,
+    openTopicId: Long,
     padding: PaddingValues,
     onItemClick: (StashItem) -> Unit,
     onOpenAlbum: (Long) -> Unit,
@@ -183,7 +184,7 @@ private fun GalleryScreen(
     val selecting = gallery.selected != null
 
     // endless scroll trigger (main gallery only)
-    if (inAlbum == null) {
+    if (openTopicId == 0L) {
         LaunchedEffect(gridState, gallery.items.size) {
             snapshotFlow {
                 val info = gridState.layoutInfo
@@ -191,11 +192,6 @@ private fun GalleryScreen(
                 last >= info.totalItemsCount - 12 && info.totalItemsCount > 0
             }.collect { should -> if (should) vm.loadMore() }
         }
-    }
-
-    // ---- album list view ----
-    if (inAlbum == null && gallery.albums.isNotEmpty() && !selecting) {
-        // show albums strip at top of the grid (row of chips), items grouped by month
     }
 
     if (gallery.items.isEmpty() && gallery.albums.isEmpty() && !gallery.syncing) {
@@ -211,8 +207,7 @@ private fun GalleryScreen(
 
     Box(Modifier.fillMaxSize().padding(padding)) {
         Column(Modifier.fillMaxSize()) {
-            // albums strip
-            if (inAlbum == null && gallery.albums.isNotEmpty() && !selecting) {
+            if (openTopicId == 0L && gallery.albums.isNotEmpty() && !selecting) {
                 AlbumsStrip(gallery.albums, onOpen = onOpenAlbum)
             }
             if (gallery.syncing) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -235,10 +230,8 @@ private fun GalleryScreen(
                     items(monthItems, key = { it.messageId }) { item ->
                         val selected = gallery.selected?.contains(item.messageId) == true
                         GalleryCell(
-                            vm = vm,
                             item = item,
                             selected = selected,
-                            selecting = selecting,
                             onClick = {
                                 if (selecting) vm.toggleSelect(item.messageId)
                                 else onItemClick(item)

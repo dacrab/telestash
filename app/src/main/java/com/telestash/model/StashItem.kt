@@ -19,8 +19,6 @@ data class StashItem(
     /** 64-bit perceptual hash; 0 = not computed. */
     val phash: Long = 0L,
 ) {
-    val backedUpDeviceUri: String? get() = deviceUri
-
     companion object {
         fun fromMessage(msg: TdApi.Message): StashItem? {
             return when (val c = msg.content) {

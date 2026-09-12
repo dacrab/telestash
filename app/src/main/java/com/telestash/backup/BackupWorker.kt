@@ -9,14 +9,14 @@ import androidx.work.WorkerParameters
 import com.telestash.data.ItemEntity
 import com.telestash.data.SettingsRepository
 import com.telestash.data.StashDbHolder
-import com.telestash.model.StashItem
+import com.telestash.model.messageToEntity
+import com.telestash.model.toEntity
 import com.telestash.td.TdException
 import com.telestash.td.TgClient
 import com.telestash.util.PerceptualHash
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
-import org.drinkless.tdlib.TdApi
 import java.io.File
 
 /**
@@ -32,68 +32,39 @@ class BackupWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val client = TgClient.peek() ?: return@withContext Result.failure()
-        if (!TgClient.started) return@withContext Result.retry()
+        if (!client.isStarted) return@withContext Result.retry()
 
         val dao = StashDbHolder.db(applicationContext).itemDao()
         val settings = SettingsRepository(applicationContext)
-        val allowedFolders = parseFolders(settings.backupFolders.first())
+        val allowedFolders = settings.backupFolders.first()
         val dedupe = settings.dedupeEnabled.first()
         val resolver = applicationContext.contentResolver
 
-        val toBackup = mutableListOf<BackupCandidate>()
-        toBackup.addAll(query(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL), resolver, allowedFolders))
-        toBackup.addAll(query(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL), resolver, allowedFolders))
+        val toBackup =
+            queryMedia(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL), resolver, allowedFolders) +
+                queryMedia(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL), resolver, allowedFolders)
 
         var uploaded = 0
         var failures = 0
         for (cand in toBackup) {
             if (isStopped) return@withContext Result.retry()
+            if (dao.countByDeviceUri(cand.uri.toString()) > 0) continue
             try {
-                if (dao.countByDeviceUri(cand.uri.toString()) > 0) continue
-
-                val staged = File(applicationContext.cacheDir, "backup/${cand.displayName}")
-                staged.parentFile?.mkdirs()
-                if (staged.exists()) staged.delete()
-                resolver.openInputStream(cand.uri)?.use { input ->
-                    staged.outputStream().use { input.copyTo(it) }
-                } ?: continue
+                val staged = stage(cand) ?: continue
 
                 var phash = 0L
                 if (dedupe && !cand.isVideo) {
                     phash = PerceptualHash.compute(staged) ?: 0L
-                    if (phash != 0L) {
-                        val dup = dao.allPhashes().any { PerceptualHash.isProbablyDuplicate(it.phash, phash) }
-                        if (dup) {
-                            // mark as backed up without uploading: skip & record
-                            dao.upsertAll(
-                                listOf(
-                                    entityFor(cand, staged, msgIdPlaceholder(cand.uri), phash)
-                                )
-                            )
-                            staged.delete()
-                            continue
-                        }
+                    if (phash != 0L && dao.allPhashes().any { PerceptualHash.isProbablyDuplicate(it, phash) }) {
+                        // record without uploading so this uri is never re-scanned
+                        dao.upsertAll(listOf(cand.markerEntity(phash)))
+                        staged.delete()
+                        continue
                     }
                 }
 
                 val msg = client.uploadDocument(staged.absolutePath, cand.displayName)
-                val item = StashItem.fromMessage(msg)
-                dao.upsertAll(
-                    listOf(
-                        ItemEntity(
-                            messageId = msg.id,
-                            chatId = msg.chatId,
-                            date = msg.date,
-                            fileId = item?.fileId ?: 0,
-                            fileName = cand.displayName,
-                            sizeBytes = cand.size,
-                            isVideo = cand.isVideo,
-                            localPath = null,
-                            deviceUri = cand.uri.toString(),
-                            phash = phash,
-                        )
-                    )
-                )
+                dao.upsertAll(listOfNotNull(messageToEntity(msg)?.copy(deviceUri = cand.uri.toString(), phash = phash)))
                 uploaded++
                 staged.delete()
             } catch (e: Exception) {
@@ -105,32 +76,38 @@ class BackupWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
         if (failures > 0 && uploaded == 0) Result.retry() else Result.success()
     }
 
-    /** Store a synthetic entity so a perceptual duplicate isn't re-scanned forever. */
-    private fun entityFor(cand: BackupCandidate, staged: File, msgId: Long, phash: Long) =
-        ItemEntity(
-            messageId = msgId,
-            chatId = 0,
-            date = 0,
-            fileId = 0,
-            fileName = cand.displayName,
-            sizeBytes = cand.size,
-            isVideo = cand.isVideo,
-            localPath = null,
-            deviceUri = cand.uri.toString(),
-            phash = phash,
-        )
+    // ---------- helpers ----------
 
-    private fun msgIdPlaceholder(uri: Uri): Long = -uri.hashCode().toLong()
+    /** Copy a device media item into the cache dir so TDLib can send it by path. */
+    private fun stage(cand: MediaItem): File? {
+        val dir = File(applicationContext.cacheDir, "backup").apply { mkdirs() }
+        val staged = File(dir, "${System.currentTimeMillis()}_${cand.displayName}")
+        return applicationContext.contentResolver.openInputStream(cand.uri)?.use { input ->
+            staged.outputStream().use { input.copyTo(it) }
+            staged
+        }
+    }
 
-    private fun parseFolders(csv: String): Set<String> =
-        csv.split(",").map { it.trim() }.filter { it.isNotBlank() }.toSet()
+    /** Synthetic Room row marking a perceptual duplicate as "handled". */
+    private fun MediaItem.markerEntity(phash: Long) = ItemEntity(
+        messageId = -uri.hashCode().toLong(),
+        chatId = 0L,
+        date = 0,
+        fileId = 0,
+        fileName = displayName,
+        sizeBytes = size,
+        isVideo = isVideo,
+        localPath = null,
+        deviceUri = uri.toString(),
+        phash = phash,
+    )
 
-    private fun query(
+    private fun queryMedia(
         collection: Uri,
         resolver: android.content.ContentResolver,
         allowedFolders: Set<String>,
-    ): List<BackupCandidate> {
-        val out = mutableListOf<BackupCandidate>()
+    ): List<MediaItem> {
+        val out = mutableListOf<MediaItem>()
         val projection = arrayOf(
             MediaStore.MediaColumns._ID,
             MediaStore.MediaColumns.DISPLAY_NAME,
@@ -143,21 +120,16 @@ class BackupWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
             val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
             val bucketCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
             while (cursor.moveToNext()) {
-                val id = cursor.getLong(idCol)
                 val name = cursor.getString(nameCol) ?: continue
                 val bucket = cursor.getString(bucketCol) ?: ""
                 if (allowedFolders.isNotEmpty() && bucket !in allowedFolders) continue
-                val uri = ContentUris.withAppendedId(collection, id)
-                out.add(
-                    BackupCandidate(
-                        uri, name, cursor.getLong(sizeCol),
-                        isVideo = collection.path?.contains("video") == true
-                    )
-                )
+                val uri = ContentUris.withAppendedId(collection, cursor.getLong(idCol))
+                out.add(MediaItem(uri, name, cursor.getLong(sizeCol), isVideo = collection.path?.contains("video") == true))
             }
         }
         return out
     }
 
-    data class BackupCandidate(val uri: Uri, val displayName: String, val size: Long, val isVideo: Boolean)
+    /** A device media item pending backup. */
+    private data class MediaItem(val uri: Uri, val displayName: String, val size: Long, val isVideo: Boolean)
 }

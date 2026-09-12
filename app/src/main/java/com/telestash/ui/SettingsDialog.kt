@@ -1,11 +1,14 @@
 package com.telestash.ui
 
+import android.provider.MediaStore
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.AppViewModel
@@ -16,43 +19,34 @@ fun SettingsDialog(vm: AppViewModel, onDismiss: () -> Unit) {
     val wifiOnly by vm.wifiOnly.collectAsStateWithLifecycle(initialValue = true)
     val chargingOnly by vm.chargingOnly.collectAsStateWithLifecycle(initialValue = false)
     val dedupe by vm.dedupeEnabled.collectAsStateWithLifecycle(initialValue = true)
-    val folders by vm.backupFolders.collectAsStateWithLifecycle(initialValue = "")
+    val savedFolders by vm.backupFolders.collectAsStateWithLifecycle(initialValue = emptySet())
 
     var backup by remember { mutableStateOf(autoBackup) }
     var wifi by remember { mutableStateOf(wifiOnly) }
     var charging by remember { mutableStateOf(chargingOnly) }
     var dedupeOn by remember { mutableStateOf(dedupe) }
     val chosenFolders = remember { mutableStateListOf<String>() }
-    LaunchedEffect(folders) {
+    LaunchedEffect(savedFolders) {
         chosenFolders.clear()
-        chosenFolders.addAll(folders.split(",").map { it.trim() }.filter { it.isNotBlank() })
+        chosenFolders.addAll(savedFolders)
     }
 
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     val deviceFolders = remember { mutableStateListOf<String>() }
     LaunchedEffect(Unit) {
-        // list MediaStore bucket names for folder selection
         runCatching {
             val cr = context.contentResolver
-            arrayOf(
-                android.provider.MediaStore.Images.Media.getContentUri(
-                    android.provider.MediaStore.VOLUME_EXTERNAL
-                ),
-                android.provider.MediaStore.Video.Media.getContentUri(
-                    android.provider.MediaStore.VOLUME_EXTERNAL
-                ),
+            listOf(
+                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL),
+                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL),
             ).forEach { uri ->
                 cr.query(
                     uri,
-                    arrayOf(android.provider.MediaStore.MediaColumns.BUCKET_DISPLAY_NAME),
+                    arrayOf(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME),
                     null, null, null
                 )?.use { c ->
-                    val col = c.getColumnIndexOrThrow(
-                        android.provider.MediaStore.MediaColumns.BUCKET_DISPLAY_NAME
-                    )
-                    while (c.moveToNext()) {
-                        c.getString(col)?.let { deviceFolders.add(it) }
-                    }
+                    val col = c.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+                    while (c.moveToNext()) c.getString(col)?.let { deviceFolders.add(it) }
                 }
             }
         }
@@ -77,17 +71,10 @@ fun SettingsDialog(vm: AppViewModel, onDismiss: () -> Unit) {
 
                 if (deviceFolders.isNotEmpty()) {
                     Spacer(Modifier.height(12.dp))
-                    Text(
-                        "Backup folders (none = all)",
-                        style = MaterialTheme.typography.titleSmall
-                    )
+                    Text("Backup folders (none = all)", style = MaterialTheme.typography.titleSmall)
                     LazyColumn(Modifier.heightIn(max = 160.dp)) {
                         items(deviceFolders.distinct().sorted()) { folder ->
-                            Row(
-                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(folder, Modifier.weight(1f), maxLines = 1)
+                            SettingRow(folder) {
                                 Checkbox(
                                     enabled = backup,
                                     checked = folder in chosenFolders,
@@ -129,10 +116,10 @@ fun SettingsDialog(vm: AppViewModel, onDismiss: () -> Unit) {
 @Composable
 private fun SettingRow(label: String, trailing: @Composable () -> Unit) {
     Row(
-        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth()
     ) {
-        Text(label, Modifier.weight(1f))
+        Text(label, Modifier.weight(1f), maxLines = 1)
         trailing()
     }
 }
