@@ -23,6 +23,17 @@ data class ItemEntity(
     val localPath: String?,
     /** MediaStore content URI of the device original, if this item backs it up. */
     val deviceUri: String?,
+    /** 64-bit perceptual hash of the image; 0 = not computed. */
+    val phash: Long = 0L,
+    /** Saved Messages topic id (album) this message lives in; 0 = main chat. */
+    val topicId: Long = 0L,
+)
+
+@Entity(tableName = "albums")
+data class AlbumEntity(
+    @PrimaryKey val topicId: Long,
+    val name: String,
+    val order: Long,
 )
 
 @Dao
@@ -30,14 +41,34 @@ interface ItemDao {
     @Query("SELECT * FROM items ORDER BY date DESC, messageId DESC")
     fun observeAll(): Flow<List<ItemEntity>>
 
-    @Query("SELECT * FROM items WHERE chatId = :chatId ORDER BY date DESC LIMIT 1")
-    suspend fun newest(chatId: Long): ItemEntity?
+    @Query("SELECT * FROM items WHERE topicId = 0 ORDER BY date DESC, messageId DESC")
+    fun observeMainItems(): Flow<List<ItemEntity>>
+
+    @Query("SELECT * FROM items WHERE topicId = :topicId ORDER BY date DESC, messageId DESC")
+    fun observeTopic(topicId: Long): Flow<List<ItemEntity>>
+
+    @Query("SELECT * FROM items WHERE phash = :hash AND phash != 0 LIMIT 1")
+    suspend fun findByPhash(hash: Long): ItemEntity?
+
+    @Query("SELECT messageId, phash FROM items WHERE phash != 0")
+    suspend fun allPhashes(): List<PhashRow>
+
+    data class PhashRow(val messageId: Long, val phash: Long)
 
     @Query("SELECT COUNT(*) FROM items WHERE deviceUri = :uri")
     suspend fun countByDeviceUri(uri: String): Int
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(items: List<ItemEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAlbums(albums: List<AlbumEntity>)
+
+    @Query("SELECT * FROM albums ORDER BY `order` DESC")
+    fun observeAlbums(): Flow<List<AlbumEntity>>
+
+    @Query("DELETE FROM albums WHERE topicId = :topicId")
+    suspend fun deleteAlbum(topicId: Long)
 
     @Query("DELETE FROM items WHERE messageId IN (:ids)")
     suspend fun deleteAll(ids: List<Long>)
@@ -46,7 +77,11 @@ interface ItemDao {
     suspend fun clear()
 }
 
-@Database(entities = [ItemEntity::class], version = 1, exportSchema = false)
+@Database(
+    entities = [ItemEntity::class, AlbumEntity::class],
+    version = 2,
+    exportSchema = false
+)
 abstract class StashDb : RoomDatabase() {
     abstract fun itemDao(): ItemDao
 }

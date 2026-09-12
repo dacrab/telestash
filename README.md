@@ -15,12 +15,15 @@ closed ones like Unlim.
 ## Features
 
 - **First-run onboarding**: paste your own `api_id`/`api_hash` (from my.telegram.org) — stored on-device only, no build-time config needed
-- Phone-number login (like the real Telegram client), SMS code + 2FA cloud password support
+- **Telegram-style login**: enter phone number, code arrives in your Telegram app (or SMS/call), 2FA cloud password supported
 - Upload multiple photos/videos per pick (system photo picker) — sent losslessly as documents
-- **Auto-backup** (optional, Settings): WorkManager periodically uploads new device photos/videos to Telegram, with Wi-Fi-only and charging-only constraints
-- **Encrypted TDLib database**: the local TDLib key is generated once and wrapped by Android Keystore (AES/GCM) — never stored in plaintext
-- 3-column gallery grid backed by a Room cache — instant startup, endless scroll, "backed up" cloud badge on device photos
-- Full-screen viewer: **pinch-to-zoom** (zoomable lib), **ExoPlayer video streaming**, metadata, save back to device, delete from Telegram
+- **Auto-backup** (optional, Settings): WorkManager periodically uploads new device photos/videos to Telegram, with Wi-Fi-only and charging-only constraints, **folder selection** and **perceptual-hash duplicate skipping** (8x8 aHash, Hamming ≤ 8)
+- **Albums**: Saved Messages topics act as albums — create from the toolbar, add selected photos via move (forward-copy + delete)
+- **Multi-select**: long-press to enter selection mode; select all, bulk download, bulk delete, add to album
+- **Date-grouped timeline**: month headers like Google Photos
+- **Encrypted TDLib database**: local key generated once, wrapped by Android Keystore (AES/GCM)
+- Gallery grid backed by a Room cache — instant startup, endless scroll, "backed up" cloud badge
+- Full-screen viewer: pinch-to-zoom, ExoPlayer video streaming, metadata, save back to device, delete
 - 100% local: no third-party server, no tracking, no bot token required
 
 ## Getting your Telegram API credentials
@@ -65,8 +68,12 @@ Or open the project in Android Studio and press Run.
   originals are preserved byte-for-byte.
 - **Gallery** — Room caches message metadata; `getChatHistory` pages sync it. Thumbnails
   come from TDLib's file cache, downloading on demand.
+- **Albums** — Saved Messages *topics* (`sendMessage` with `MessageTopicSavedMessages`,
+  `getSavedMessagesTopicHistory`, `forwardMessages` for moves, `loadSavedMessagesTopics`
+  for listing via `updateSavedMessagesTopic`).
 - **Auto-backup** — `BackupWorker` (WorkManager, ~6h periodic) scans MediaStore for
-  images/videos not yet uploaded (deduped by MediaStore URI) and uploads them.
+  images/videos not yet uploaded (deduped by MediaStore URI + optional perceptual hash)
+  and uploads them. Choose which device folders to include.
 - **Security** — TDLib's local database is encrypted with a 64-byte key that is
   generated once and stored only in Keystore-wrapped form (AES/GCM).
 
@@ -80,11 +87,11 @@ Or open the project in Android Studio and press Run.
 
 ## Roadmap
 
-- [ ] Date-grouped timeline (months/years headers)
-- [ ] Albums via Saved Messages topics
-- [ ] Multi-select operations (delete/download)
-- [ ] Instant local-camera-upload ("backup this folder only")
-- [ ] Duplicate detection (perceptual hashing)
+- [ ] Search by caption/filename
+- [ ] "On this day" memories
+- [ ] Trash (soft-delete via a dedicated topic before permanent removal)
+- [ ] Multi-account support
+- [ ] Auto-backup compression option (re-encode >1080p videos before upload)
 
 ## License
 

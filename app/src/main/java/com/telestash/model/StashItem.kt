@@ -14,6 +14,10 @@ data class StashItem(
     val localPath: String?,
     /** MediaStore uri of the device original, if this item is an auto-backup of it. */
     val deviceUri: String? = null,
+    /** Saved Messages topic id (album); 0 = main gallery. */
+    val topicId: Long = 0L,
+    /** 64-bit perceptual hash; 0 = not computed. */
+    val phash: Long = 0L,
 ) {
     val backedUpDeviceUri: String? get() = deviceUri
 

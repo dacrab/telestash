@@ -73,7 +73,6 @@ class TgClient private constructor(
     val updates: SharedFlow<TdApi.Update> = _updates.asSharedFlow()
 
     private val pending = ConcurrentHashMap<Unit, CompletableDeferred<TdApi.Object>>()
-
     internal val native: Client = Client.create(
         { update ->
             if (update is TdApi.Update) {
@@ -141,13 +140,64 @@ class TgClient private constructor(
         return send(TdApi.CreatePrivateChat(myId, true)).id
     }
 
-    /** Upload a file losslessly as document to Saved Messages. */
-    suspend fun uploadDocument(path: String, fileName: String): TdApi.Message {
+    /**
+     * Ensure an album topic exists in Saved Messages: forward a message to the main
+     * Saved Messages chat with a MessageTopicSavedMessages id? Not possible to create
+     * arbitrary topics via dedicated method; topics are created implicitly by sending
+     * a message into a topic id. Telegram derives topic ids from the forwarded-from
+     * chat, so custom "album" topics work via tags-lite: we instead create topics by
+     * sending a message with topicId = MessageTopicSavedMessages(newId) where newId is
+     * derived from time. The update updateSavedMessagesTopic then confirms it.
+     */
+    suspend fun ensureAlbumTopic(albumName: String): Long {
         val chatId = savedMessagesChatId()
+        // topic ids in Saved Messages are derived from chat_id of origin; for
+        // client-created topics we use a locally-generated id and let the server
+        // confirm via updateSavedMessagesTopic (guaranteed before result returns).
+        val probeId = System.currentTimeMillis()
+        send(
+            TdApi.SendMessage(
+                chatId,
+                TdApi.MessageTopicSavedMessages(probeId),
+                null, null, null,
+                TdApi.InputMessageText(
+                    TdApi.FormattedText("telestash-album:$albumName", arrayOf()),
+                    null, false
+                )
+            )
+        )
+        return probeId
+    }
+
+    /** List Saved Messages topics (albums) via LoadSavedMessagesTopics + updates. */
+    suspend fun loadTopics(): List<TdApi.SavedMessagesTopic> {
+        val collected = mutableListOf<TdApi.SavedMessagesTopic>()
+        val collector = CoroutineScope(Dispatchers.IO)
+        val job = collector.launch {
+            updates
+                .filterIsInstance<TdApi.UpdateSavedMessagesTopic>()
+                .collect { u -> collected.add(u.topic) }
+        }
+        runCatching { send(TdApi.LoadSavedMessagesTopics(100)) }
+        kotlinx.coroutines.delay(700)
+        job.cancel()
+        collector.cancel()
+        return collected.distinctBy { it.id }
+    }
+
+    /** Upload a file losslessly as document, optionally into an album topic. */
+    suspend fun uploadDocument(
+        path: String,
+        fileName: String,
+        topicId: Long = 0L,
+    ): TdApi.Message {
+        val chatId = savedMessagesChatId()
+        val topic = if (topicId > 0) TdApi.MessageTopicSavedMessages(topicId) else null
         return send(
             TdApi.SendMessage(
                 chatId,
-                null, null, null, null,
+                topic,
+                null, null, null,
                 TdApi.InputMessageDocument(
                     TdApi.InputDocument(TdApi.InputFileLocal(path), null, false),
                     TdApi.FormattedText("telestash:$fileName", arrayOf())
@@ -156,9 +206,31 @@ class TgClient private constructor(
         )
     }
 
+    /** Move messages (photos) into an album topic. */
+    suspend fun moveToTopic(messageIds: LongArray, topicId: Long): List<TdApi.Message> {
+        val chatId = savedMessagesChatId()
+        val res = send(
+            TdApi.ForwardMessages(
+                chatId,
+                TdApi.MessageTopicSavedMessages(topicId),
+                chatId,
+                messageIds,
+                null,
+                true,   // send copy
+                false
+            )
+        )
+        send(TdApi.DeleteMessages(chatId, messageIds, true))
+        return res.messages.toList()
+    }
+
     /** Newest-first history page of Saved Messages. */
     suspend fun history(chatId: Long, fromMessageId: Long, limit: Int): TdApi.Messages =
         send(TdApi.GetChatHistory(chatId, fromMessageId, 0, limit, false))
+
+    /** Newest-first history page of a Saved Messages topic (album). */
+    suspend fun topicHistory(topicId: Long, fromMessageId: Long, limit: Int): TdApi.Messages =
+        send(TdApi.GetSavedMessagesTopicHistory(topicId, fromMessageId, 0, limit))
 
     /** Download a file synchronously (priority 16); returns local path. */
     suspend fun download(fileId: Int): String =

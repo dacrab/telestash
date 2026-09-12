@@ -2,11 +2,13 @@ package com.telestash.ui.gallery
 
 import android.graphics.BitmapFactory
 import android.view.ViewGroup
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
@@ -128,13 +130,29 @@ private fun StashItem.minithumbPlaceholder() {
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun GalleryCell(vm: AppViewModel, item: StashItem, onClick: () -> Unit) {
+fun GalleryCell(
+    vm: AppViewModel,
+    item: StashItem,
+    selected: Boolean = false,
+    selecting: Boolean = false,
+    onClick: () -> Unit = {},
+    onLongClick: () -> Unit = {},
+) {
     Box(
         Modifier
             .fillMaxSize()
             .padding(1.dp)
-            .clickable { onClick() }
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+            )
+            .then(
+                if (selected) Modifier.background(
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+                ) else Modifier
+            )
     ) {
         StashImage(item)
         if (item.isVideo) {
@@ -146,6 +164,17 @@ fun GalleryCell(vm: AppViewModel, item: StashItem, onClick: () -> Unit) {
                     .align(Alignment.TopEnd)
                     .padding(6.dp)
                     .size(20.dp)
+            )
+        }
+        if (selected) {
+            Icon(
+                Icons.Filled.CheckCircle,
+                contentDescription = "Selected",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(6.dp)
+                    .size(22.dp)
             )
         }
         if (item.deviceUri != null) {

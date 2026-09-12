@@ -27,6 +27,8 @@ class SettingsRepository(private val context: Context) {
         val BACKUP_ON_WIFI = booleanPreferencesKey("backup_wifi_only")
         val BACKUP_WHEN_CHARGING = booleanPreferencesKey("backup_charging_only")
         val ONBOARDED = booleanPreferencesKey("onboarded")
+        val BACKUP_FOLDERS = stringPreferencesKey("backup_folders")
+        val DEDUPE = booleanPreferencesKey("dedupe_enabled")
     }
 
     val credentials: Flow<Pair<Int, String>> = context.settings.data.map { p ->
@@ -42,6 +44,19 @@ class SettingsRepository(private val context: Context) {
     val autoBackup: Flow<Boolean> = context.settings.data.map { it[Keys.AUTO_BACKUP] ?: false }
     val wifiOnly: Flow<Boolean> = context.settings.data.map { it[Keys.BACKUP_ON_WIFI] ?: true }
     val chargingOnly: Flow<Boolean> = context.settings.data.map { it[Keys.BACKUP_WHEN_CHARGING] ?: false }
+
+    /** Comma-separated MediaStore bucket names to back up; empty = all folders. */
+    val backupFolders: Flow<String> = context.settings.data.map { it[Keys.BACKUP_FOLDERS] ?: "" }
+
+    suspend fun setBackupFolders(folders: Set<String>) {
+        context.settings.edit { it[Keys.BACKUP_FOLDERS] = folders.joinToString(",") }
+    }
+
+    val dedupeEnabled: Flow<Boolean> = context.settings.data.map { it[Keys.DEDUPE] ?: true }
+
+    suspend fun setDedupeEnabled(enabled: Boolean) {
+        context.settings.edit { it[Keys.DEDUPE] = enabled }
+    }
 
     suspend fun setAutoBackup(enabled: Boolean) {
         context.settings.edit { it[Keys.AUTO_BACKUP] = enabled }
