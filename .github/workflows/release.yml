@@ -1,38 +1,36 @@
 name: Release
-
 on:
   push:
-    tags: ["v*"]
+    tags: ['v*']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: write
-
 jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: 21
-
       - uses: gradle/actions/setup-gradle@67621b124fd2e251c5e8a0e6e3b91318f2287669 # v6.3.0
 
       - name: Decode signing keystore
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
-        run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.keystore
+        if: ${{ env.HAS_KEYSTORE == 'true' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        run: echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
 
-      - name: Lint and build release APK
+      - name: Build release APK
         run: |
           if [ -f release.keystore ]; then
             export KEYSTORE_FILE=release.keystore
@@ -46,7 +44,6 @@ jobs:
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
           mv app/build/outputs/apk/release/app-release.apk "telestash-${VERSION}.apk"
-          echo "version=$VERSION" >> "$GITHUB_ENV"
 
       - uses: softprops/action-gh-release@e598afbe1493e6b1bafb1f389cabb956eab91231 # v3.0.3
         with:
@@ -56,8 +53,8 @@ jobs:
           body: |
             ## Installation
 
-            Download `telestash-${{ env.version }}.apk` and install it on your
-            Android phone (enable "install from unknown sources" if asked).
+            Download the APK and install it on your Android phone
+            (enable "install from unknown sources" if asked).
 
             > APKs are signed with the CI key unless release secrets are configured.
             > Verify you trust the source before installing.
