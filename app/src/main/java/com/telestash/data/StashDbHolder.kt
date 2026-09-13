@@ -12,7 +12,7 @@ object StashDbHolder {
             db ?: Room.databaseBuilder(
                 context.applicationContext,
                 StashDb::class.java,
-                "stash.db"
+                "stash.db",
             )
                 // v2 added phash/topicId to a cache-only db: drop & rebuild is fine
                 .fallbackToDestructiveMigration()

@@ -3,6 +3,21 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.ktlint)
+    alias(libs.plugins.detekt)
+}
+
+detekt {
+    config.setFrom(files("$rootDir/config/detekt.yml"))
+    buildUponDefaultConfig = true
+}
+
+ktlint {
+    // Kotlin 2.2 scripts trip the old ktlint parser bundled with the plugin;
+    // source files are still fully checked.
+    filter {
+        exclude { it.file.extension == "kts" }
+    }
 }
 
 android {

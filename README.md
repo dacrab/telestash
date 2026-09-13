@@ -1,101 +1,60 @@
 # TeleStash
 
-Open-source Google Photos–style gallery that uses **Telegram as unlimited photo storage**.
+A Google Photos–style gallery app that stores your photos and videos in **Telegram** — free, unlimited, and private.
 
-Photos are uploaded as **documents** (lossless, no Telegram re-compression) into your own
-**Saved Messages** via MTProto (TDLib) — your account, your cloud, no middleman server.
+## The idea
 
-## Why
+Google Photos ended free unlimited storage. Telegram gives every account unlimited cloud storage for files sent to yourself. TeleStash connects the two: it backs up your camera roll to your own Telegram "Saved Messages" and turns it back into a beautiful, familiar photo gallery.
 
-Google Photos ended free unlimited storage. Telegram gives every account free unlimited
-cloud storage for documents sent to yourself. TeleStash turns that into a real photo
-gallery app — a maintained, open alternative to abandoned projects like TeleDrive and
-closed ones like Unlim.
+Everything stays **yours** — your Telegram account, your files, no middleman server, no tracking.
 
-## Features
+## What it does
 
-- **First-run onboarding**: paste your own `api_id`/`api_hash` (from my.telegram.org) — stored on-device only, no build-time config needed
-- **Telegram-style login**: enter phone number, code arrives in your Telegram app (or SMS/call), 2FA cloud password supported
-- Upload multiple photos/videos per pick (system photo picker) — sent losslessly as documents
-- **Auto-backup** (optional, Settings): WorkManager periodically uploads new device photos/videos to Telegram, with Wi-Fi-only and charging-only constraints, **folder selection** and **perceptual-hash duplicate skipping** (8x8 aHash, Hamming ≤ 8)
-- **Albums**: Saved Messages topics act as albums — create from the toolbar, add selected photos via move (forward-copy + delete)
-- **Multi-select**: long-press to enter selection mode; select all, bulk download, bulk delete, add to album
-- **Date-grouped timeline**: month headers like Google Photos
-- **Encrypted TDLib database**: local key generated once, wrapped by Android Keystore (AES/GCM)
-- Gallery grid backed by a Room cache — instant startup, endless scroll, "backed up" cloud badge
-- Full-screen viewer: pinch-to-zoom, ExoPlayer video streaming, metadata, save back to device, delete
-- 100% local: no third-party server, no tracking, no bot token required
+- **Automatic backup** — new photos and videos upload on their own (every ~6 hours), optionally only on Wi-Fi and while charging. You pick which folders are included, and exact duplicates are skipped automatically.
+- **Familiar gallery** — a grid of your backed-up media with month headers like Google Photos, pinch-to-zoom full-screen viewer, and video playback.
+- **Albums** — organize photos into albums; select a bunch and move them in one tap.
+- **Multi-select** — long-press to select, then download or delete in bulk.
+- **Upload without quality loss** — photos and videos are sent as original files, so Telegram never re-compresses them.
+- **Private by design** — everything runs on your phone and talks only to Telegram. The local cache is encrypted.
 
-## Getting your Telegram API credentials
+## Getting started
 
-TeleStash needs a Telegram `api_id` / `api_hash` pair (free, takes 2 minutes):
+1. Install the app on your Android phone.
+2. On first launch, enter a Telegram `api_id` / `api_hash` (free — see below).
+3. Log in with your phone number, the code Telegram sends you, and your 2FA password if you have one.
+4. That's it — your Saved Messages is now your photo cloud.
+
+### Getting Telegram API credentials (2 minutes)
 
 1. Log in at <https://my.telegram.org>
 2. Open **API development tools**
-3. Create an app (any title, e.g. `TeleStash`)
-4. Copy `api_id` and `api_hash`
+3. Create an app (any name works) and copy the `api_id` and `api_hash`
 
-The app asks for these on first launch. Keep them private; they're stored in
-DataStore on your device only. (To bake them into a personal build instead, put
-them in `AppViewModel.kt`'s startup or use a `local.properties` scheme.)
+These are only stored on your device.
 
-## Building
+## Building from source
 
-Requirements: JDK 17+ (21 recommended), Android SDK 35.
+Requirements: JDK 17+, Android SDK 35.
 
 ```bash
 ./gradlew assembleDebug
 # APK: app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Install on a connected device:
-
-```bash
-adb install app/build/outputs/apk/debug/app-debug.apk
-```
-
 Or open the project in Android Studio and press Run.
 
-## How it works
+## Good to know
 
-- **TDLib (MTProto)** — the same native library official Telegram clients use, bundled
-  as a prebuilt AAR (`app/libs/core-release.aar`, all 4 ABIs, from the
-  [tdlib-android](https://github.com/AkashPriyadarshii/tdlib-android) distribution,
-  Boost-licensed, CI-built from the official tdlib/td source).
-- **Upload** — files are staged in app cache and sent via `sendMessage` with an
-  `InputMessageDocument` to Saved Messages (resolved via `getOption("my_id")` →
-  `createPrivateChat`). Documents skip Telegram's photo compression pipeline, so
-  originals are preserved byte-for-byte.
-- **Gallery** — Room caches message metadata; `getChatHistory` pages sync it. Thumbnails
-  come from TDLib's file cache, downloading on demand.
-- **Albums** — Saved Messages *topics* (`sendMessage` with `MessageTopicSavedMessages`,
-  `getSavedMessagesTopicHistory`, `forwardMessages` for moves, `loadSavedMessagesTopics`
-  for listing via `updateSavedMessagesTopic`).
-- **Auto-backup** — `BackupWorker` (WorkManager, ~6h periodic) scans MediaStore for
-  images/videos not yet uploaded (deduped by MediaStore URI + optional perceptual hash)
-  and uploads them. Choose which device folders to include.
-- **Security** — TDLib's local database is encrypted with a 64-byte key that is
-  generated once and stored only in Keystore-wrapped form (AES/GCM).
-
-## Storage notes
-
-- Telegram file limit: **2 GB per file** (4 GB with Premium) — fine for photos, and
-  videos up to that size.
-- Telegram's unlimited-storage offer applies to documents kept in your own account.
-  Using your account as your personal backup locker is exactly what Saved Messages
-  is for.
+- Telegram allows files up to **2 GB** each (4 GB with Premium) — plenty for photos and most videos.
+- Telegram is not a magic backup service: if you delete a message in Saved Messages, the photo is gone from the cloud copy too.
 
 ## Roadmap
 
-- [ ] Search by caption/filename
-- [ ] "On this day" memories
-- [ ] Trash (soft-delete via a dedicated topic before permanent removal)
-- [ ] Multi-account support
-- [ ] Auto-backup compression option (re-encode >1080p videos before upload)
+- Search by caption/filename
+- "On this day" memories
+- Trash / soft delete
+- Multi-account support
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-TDLib is Boost Software License 1.0; the bundled prebuilt AAR keeps its own license
-notice (see `app/libs/`).

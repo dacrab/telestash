@@ -1,11 +1,27 @@
 package com.telestash.ui
 
 import android.provider.MediaStore
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -14,7 +30,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.AppViewModel
 
 @Composable
-fun SettingsDialog(vm: AppViewModel, onDismiss: () -> Unit) {
+fun SettingsDialog(
+    vm: AppViewModel,
+    onDismiss: () -> Unit,
+) {
     val autoBackup by vm.autoBackup.collectAsStateWithLifecycle(initialValue = false)
     val wifiOnly by vm.wifiOnly.collectAsStateWithLifecycle(initialValue = true)
     val chargingOnly by vm.chargingOnly.collectAsStateWithLifecycle(initialValue = false)
@@ -43,7 +62,9 @@ fun SettingsDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                 cr.query(
                     uri,
                     arrayOf(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME),
-                    null, null, null
+                    null,
+                    null,
+                    null,
                 )?.use { c ->
                     val col = c.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
                     while (c.moveToNext()) c.getString(col)?.let { deviceFolders.add(it) }
@@ -79,9 +100,12 @@ fun SettingsDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                                     enabled = backup,
                                     checked = folder in chosenFolders,
                                     onCheckedChange = { checked ->
-                                        if (checked) chosenFolders.add(folder)
-                                        else chosenFolders.remove(folder)
-                                    }
+                                        if (checked) {
+                                            chosenFolders.add(folder)
+                                        } else {
+                                            chosenFolders.remove(folder)
+                                        }
+                                    },
                                 )
                             }
                         }
@@ -92,7 +116,7 @@ fun SettingsDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                 Text(
                     "Auto-backup runs every ~6 hours in the background.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         },
@@ -109,15 +133,18 @@ fun SettingsDialog(vm: AppViewModel, onDismiss: () -> Unit) {
                 TextButton(enabled = backup, onClick = { vm.backupNow() }) { Text("Back up now") }
                 TextButton(onClick = onDismiss) { Text("Cancel") }
             }
-        }
+        },
     )
 }
 
 @Composable
-private fun SettingRow(label: String, trailing: @Composable () -> Unit) {
+private fun SettingRow(
+    label: String,
+    trailing: @Composable () -> Unit,
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Text(label, Modifier.weight(1f), maxLines = 1)
         trailing()

@@ -1,0 +1,48 @@
+# Detekt config tailored to this codebase.
+# Every disabled rule below has a concrete reason; everything else is strict.
+
+build:
+  maxIssues: 0
+
+complexity:
+  LongMethod:
+    # Largest composables (PhotoViewerDialog, SettingsDialog) sit around 60-90 lines;
+    # splitting them further would hurt readability more than help.
+    threshold: 120
+  LongParameterList:
+    # TdApi constructors and Compose previews legitimately take many params,
+    # and data classes map 1:1 to Room columns.
+    active: false
+  TooManyFunctions:
+    # AppViewModel is the single ViewModel for the whole app by design.
+    active: false
+
+style:
+  MaxLineLength:
+    maxLineLength: 120
+  ReturnCount:
+    # Early-return chains in TDLib error/state handling are clearer than nesting.
+    active: false
+  UnusedPrivateMember:
+    ignoreAnnotated: [ 'Preview' ]
+
+naming:
+  FunctionNaming:
+    # Composable funs are PascalCase by official convention.
+    ignoreAnnotated: [ 'Composable' ]
+  TopLevelPropertyNaming:
+    constantPattern: '[A-Za-z][_A-Za-z0-9]*'
+
+exceptions:
+  TooGenericExceptionCaught:
+    # TDLib/MediaStore calls fail with varied exception types; broad catches at
+    # per-item boundaries are intentional so one bad file can't kill a batch.
+    active: false
+  SwallowedException:
+    # Background sync paths log nothing by design (no logger in v0.x).
+    active: false
+
+empty-blocks:
+  EmptyFunctionBlock:
+    # TDLib Client.create requires exception handlers; they are deliberate no-ops.
+    active: false

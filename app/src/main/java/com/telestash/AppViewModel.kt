@@ -45,11 +45,17 @@ import java.util.concurrent.TimeUnit
 
 sealed interface AuthUi {
     data object NeedCredentials : AuthUi
+
     data object Loading : AuthUi
+
     data object Phone : AuthUi
+
     data class Code(val hint: String) : AuthUi
+
     data class Password(val hint: String) : AuthUi
+
     data object Registration : AuthUi
+
     data object Ready : AuthUi
 }
 
@@ -65,6 +71,15 @@ data class GalleryUi(
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
+    companion object {
+        const val MIN_API_HASH_LENGTH = 8
+        const val HISTORY_PAGE_SIZE = 100
+        const val SYNC_MAX_ITEMS = 1000
+        const val PICK_LIMIT = 20
+        const val SCROLL_PRELOAD_THRESHOLD = 12
+        const val BACKUP_INTERVAL_HOURS = 6L
+        const val BACKOFF_SECONDS = 30L
+    }
 
     private val settings = SettingsRepository(app)
     private val dao by lazy { StashDbHolder.db(app).itemDao() }
@@ -156,22 +171,26 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
     }
 
-    private fun describeCode(info: TdApi.AuthenticationCodeInfo): String = when (val t = info.type) {
-        is TdApi.AuthenticationCodeTypeTelegramMessage ->
-            "Code sent to your Telegram app (${t.length} digits)\nCheck your other Telegram sessions"
-        is TdApi.AuthenticationCodeTypeSms -> "Code sent via SMS"
-        is TdApi.AuthenticationCodeTypeCall -> "Code sent via phone call"
-        is TdApi.AuthenticationCodeTypeFlashCall -> "Code sent via flash call"
-        is TdApi.AuthenticationCodeTypeMissedCall -> "Code sent via missed call"
-        is TdApi.AuthenticationCodeTypeFragment -> "Code sent via Fragment"
-        else -> "Code sent"
-    }
+    private fun describeCode(info: TdApi.AuthenticationCodeInfo): String =
+        when (val t = info.type) {
+            is TdApi.AuthenticationCodeTypeTelegramMessage ->
+                "Code sent to your Telegram app (${t.length} digits)\nCheck your other Telegram sessions"
+            is TdApi.AuthenticationCodeTypeSms -> "Code sent via SMS"
+            is TdApi.AuthenticationCodeTypeCall -> "Code sent via phone call"
+            is TdApi.AuthenticationCodeTypeFlashCall -> "Code sent via flash call"
+            is TdApi.AuthenticationCodeTypeMissedCall -> "Code sent via missed call"
+            is TdApi.AuthenticationCodeTypeFragment -> "Code sent via Fragment"
+            else -> "Code sent"
+        }
 
     // ---------- credentials onboarding ----------
 
-    fun saveCredentials(apiId: String, apiHash: String) = viewModelScope.launch(Dispatchers.IO) {
+    fun saveCredentials(
+        apiId: String,
+        apiHash: String,
+    ) = viewModelScope.launch(Dispatchers.IO) {
         val id = apiId.trim().toIntOrNull()
-        if (id == null || id <= 0 || apiHash.trim().length < 8) {
+        if (id == null || id <= 0 || apiHash.trim().length < MIN_API_HASH_LENGTH) {
             _toasts.tryEmit("Invalid credentials")
             return@launch
         }
@@ -189,8 +208,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- auth actions ----------
 
     fun submitPhone(phone: String) = vmIo { it.setPhone(phone.trim()) }
+
     fun submitCode(code: String) = vmIo { it.checkCode(code.trim()) }
+
     fun submitPassword(pw: String) = vmIo { it.checkPassword(pw) }
+
     fun submitRegistration(name: String) = vmIo { it.registerUser(name.trim()) }
 
     private fun vmIo(block: suspend (TgClient) -> Unit) {
@@ -202,9 +224,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun userError(e: Throwable): String {
         val msg = e.message ?: "unknown error"
-        return if (e is TdException && e.isFloodWait)
+        return if (e is TdException && e.isFloodWait) {
             "Too many attempts. Wait ${e.floodWaitSeconds}s"
-        else "Error: $msg"
+        } else {
+            "Error: $msg"
+        }
     }
 
     // ---------- gallery sync ----------
@@ -215,8 +239,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         try {
             var fromId = 0L
             val fetched = mutableListOf<ItemEntity>()
-            while (fetched.size < 1000) {
-                val page = c.history(fromId, 100)
+            while (fetched.size < SYNC_MAX_ITEMS) {
+                val page = c.history(fromId, HISTORY_PAGE_SIZE)
                 if (page.messages.isEmpty()) break
                 fetched.addAll(page.messages.mapNotNull { messageToEntity(it) })
                 fromId = page.messages.last().id
@@ -234,11 +258,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         runCatching {
             val topics = c.loadTopics()
             dao.upsertAlbums(
-                topics.map { AlbumEntity(topicId = it.id, name = "Album ${it.id}", order = it.order) }
+                topics.map { AlbumEntity(topicId = it.id, name = "Album ${it.id}", order = it.order) },
             )
             for (t in topics) {
                 runCatching {
-                    val msgs = c.topicHistory(t.id, 0L, 100)
+                    val msgs = c.topicHistory(t.id, 0L, HISTORY_PAGE_SIZE)
                     dao.upsertAll(msgs.messages.mapNotNull { messageToEntity(it, topicId = t.id) })
                 }
             }
@@ -252,10 +276,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _gallery.value = cur.copy(loadingMore = true)
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val page = client!!.history(oldestLoaded, 100)
-                val entities = page.messages
-                    .filter { it.id < oldestLoaded }
-                    .mapNotNull { messageToEntity(it) }
+                val page = client!!.history(oldestLoaded, HISTORY_PAGE_SIZE)
+                val entities =
+                    page.messages
+                        .filter { it.id < oldestLoaded }
+                        .mapNotNull { messageToEntity(it) }
                 if (entities.isNotEmpty()) {
                     dao.upsertAll(entities)
                     oldestLoaded = entities.minOf { it.messageId }
@@ -275,7 +300,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             viewModelScope.launch(Dispatchers.IO) {
                 val c = client ?: return@launch
                 runCatching {
-                    val msgs = c.topicHistory(topicId, 0L, 100)
+                    val msgs = c.topicHistory(topicId, 0L, HISTORY_PAGE_SIZE)
                     dao.upsertAll(msgs.messages.mapNotNull { messageToEntity(it, topicId) })
                 }
             }
@@ -286,50 +311,54 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _gallery.value = _gallery.value.copy(openTopicId = 0L, selected = null)
     }
 
-    fun createAlbum(name: String) = viewModelScope.launch(Dispatchers.IO) {
-        val c = client ?: return@launch
-        runCatching {
-            val id = c.createAlbumTopic(name)
-            dao.upsertAlbums(listOf(AlbumEntity(id, name, System.currentTimeMillis())))
-            _toasts.tryEmit("Album \"$name\" created")
-        }.onFailure { e -> _toasts.tryEmit("Could not create album: ${e.message}") }
-    }
-
-    fun deleteAlbum(topicId: Long) = viewModelScope.launch(Dispatchers.IO) {
-        val c = client ?: return@launch
-        runCatching {
-            val msgs = c.topicHistory(topicId, 0L, 100)
-            if (msgs.messages.isNotEmpty()) {
-                c.deleteMessages(
-                    msgs.messages.first().chatId,
-                    msgs.messages.map { it.id }.toLongArray()
-                )
-            }
-            dao.deleteAlbum(topicId)
-            _toasts.tryEmit("Album deleted")
-        }.onFailure { e -> _toasts.tryEmit("Could not delete album: ${e.message}") }
-    }
-
-    /** Add currently selected items to an album (existing or newly created). */
-    fun addSelectedToAlbum(albumTopicId: Long, newAlbumName: String?) =
+    fun createAlbum(name: String) =
         viewModelScope.launch(Dispatchers.IO) {
             val c = client ?: return@launch
-            val sel = _gallery.value.selected ?: return@launch
-            if (sel.isEmpty()) return@launch
             runCatching {
-                val topicId = newAlbumName?.let { c.createAlbumTopic(it) } ?: albumTopicId
-                val moved = c.moveToTopic(sel.toLongArray(), topicId)
-                dao.deleteAll(sel.toList())
-                dao.upsertAll(moved.mapNotNull { messageToEntity(it, topicId = topicId) })
-                if (newAlbumName != null) {
-                    dao.upsertAlbums(
-                        listOf(AlbumEntity(topicId, newAlbumName, System.currentTimeMillis()))
+                val id = c.createAlbumTopic(name)
+                dao.upsertAlbums(listOf(AlbumEntity(id, name, System.currentTimeMillis())))
+                _toasts.tryEmit("Album \"$name\" created")
+            }.onFailure { e -> _toasts.tryEmit("Could not create album: ${e.message}") }
+        }
+
+    fun deleteAlbum(topicId: Long) =
+        viewModelScope.launch(Dispatchers.IO) {
+            val c = client ?: return@launch
+            runCatching {
+                val msgs = c.topicHistory(topicId, 0L, HISTORY_PAGE_SIZE)
+                if (msgs.messages.isNotEmpty()) {
+                    c.deleteMessages(
+                        msgs.messages.first().chatId,
+                        msgs.messages.map { it.id }.toLongArray(),
                     )
                 }
-                _toasts.tryEmit("Added to album")
-            }.onFailure { e -> _toasts.tryEmit("Move failed: ${e.message}") }
-            exitSelectionMode()
+                dao.deleteAlbum(topicId)
+                _toasts.tryEmit("Album deleted")
+            }.onFailure { e -> _toasts.tryEmit("Could not delete album: ${e.message}") }
         }
+
+    /** Add currently selected items to an album (existing or newly created). */
+    fun addSelectedToAlbum(
+        albumTopicId: Long,
+        newAlbumName: String?,
+    ) = viewModelScope.launch(Dispatchers.IO) {
+        val c = client ?: return@launch
+        val sel = _gallery.value.selected ?: return@launch
+        if (sel.isEmpty()) return@launch
+        runCatching {
+            val topicId = newAlbumName?.let { c.createAlbumTopic(it) } ?: albumTopicId
+            val moved = c.moveToTopic(sel.toLongArray(), topicId)
+            dao.deleteAll(sel.toList())
+            dao.upsertAll(moved.mapNotNull { messageToEntity(it, topicId = topicId) })
+            if (newAlbumName != null) {
+                dao.upsertAlbums(
+                    listOf(AlbumEntity(topicId, newAlbumName, System.currentTimeMillis())),
+                )
+            }
+            _toasts.tryEmit("Added to album")
+        }.onFailure { e -> _toasts.tryEmit("Move failed: ${e.message}") }
+        exitSelectionMode()
+    }
 
     // ---------- selection ----------
 
@@ -353,48 +382,67 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- uploads ----------
 
-    fun upload(uris: List<Uri>, topicId: Long = 0L) = viewModelScope.launch(Dispatchers.IO) {
+    private enum class UploadOutcome { UPLOADED, SKIPPED_DUPLICATE, FAILED }
+
+    fun upload(
+        uris: List<Uri>,
+        topicId: Long = 0L,
+    ) = viewModelScope.launch(Dispatchers.IO) {
         val c = client ?: return@launch
         val dedupe = settings.dedupeEnabled.first()
-        var ok = 0; var skipped = 0; var failed = 0
-        for (uri in uris) {
-            try {
-                val staged = stageUri(uri) ?: error("Cannot open selected file")
-                val phash = if (dedupe && !looksLikeVideo(staged.name)) {
-                    PerceptualHash.compute(staged) ?: 0L
-                } else 0L
 
-                if (phash != 0L && dao.allPhashes().any { PerceptualHash.isProbablyDuplicate(it, phash) }) {
-                    staged.delete()
-                    skipped++
-                    continue
-                }
+        val outcomes = uris.map { uri -> runCatching { uploadOne(c, uri, topicId, dedupe) } }
+        val ok = outcomes.count { it.getOrNull() == UploadOutcome.UPLOADED }
+        val skipped = outcomes.count { it.getOrNull() == UploadOutcome.SKIPPED_DUPLICATE }
+        val failed = outcomes.size - ok - skipped
 
-                val msg = c.uploadDocument(staged.absolutePath, staged.name, topicId)
-                StashItem.fromMessage(msg)?.let {
-                    dao.upsertAll(listOf(it.toEntity(deviceUri = uri.toString(), phash = phash)))
-                }
-                staged.delete()
-                ok++
-            } catch (_: Exception) {
-                failed++
-            }
-        }
         _toasts.tryEmit(
             when {
                 skipped > 0 && failed > 0 -> "Uploaded $ok, skipped $skipped duplicates, failed $failed"
                 skipped > 0 -> "Uploaded $ok, skipped $skipped duplicates"
                 failed > 0 -> "Uploaded $ok, failed $failed"
                 else -> "Uploaded $ok file(s)"
-            }
+            },
         )
+    }
+
+    private suspend fun uploadOne(
+        c: TgClient,
+        uri: Uri,
+        topicId: Long,
+        dedupe: Boolean,
+    ): UploadOutcome {
+        val staged = stageUri(uri) ?: return UploadOutcome.FAILED
+        try {
+            val phash =
+                if (dedupe && !looksLikeVideo(staged.name)) {
+                    PerceptualHash.compute(staged) ?: 0L
+                } else {
+                    0L
+                }
+
+            if (phash != 0L && dao.allPhashes().any { PerceptualHash.isProbablyDuplicate(it, phash) }) {
+                return UploadOutcome.SKIPPED_DUPLICATE
+            }
+
+            val msg = c.uploadDocument(staged.absolutePath, staged.name, topicId)
+            StashItem.fromMessage(msg)?.let {
+                dao.upsertAll(listOf(it.toEntity(deviceUri = uri.toString(), phash = phash)))
+            }
+            return UploadOutcome.UPLOADED
+        } catch (_: Exception) {
+            return UploadOutcome.FAILED
+        } finally {
+            staged.delete()
+        }
     }
 
     /** Copy a content uri into the cache dir so TDLib can send it by local path. */
     private fun stageUri(uri: Uri): File? {
         val resolver = getApplication<Application>().contentResolver
-        val name = queryDisplayName(resolver, uri)
-            ?: "photo_${System.currentTimeMillis()}.jpg"
+        val name =
+            queryDisplayName(resolver, uri)
+                ?: "photo_${System.currentTimeMillis()}.jpg"
         // disambiguate same-named picks within one session
         val dir = File(getApplication<Application>().cacheDir, "upload").apply { mkdirs() }
         val staged = File(dir, "${System.currentTimeMillis()}_$name")
@@ -404,16 +452,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun queryDisplayName(resolver: android.content.ContentResolver, uri: Uri): String? =
+    private fun queryDisplayName(
+        resolver: android.content.ContentResolver,
+        uri: Uri,
+    ): String? =
         resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
             ?.use { csr -> if (csr.moveToFirst()) csr.getString(0) else null }
 
-    private fun looksLikeVideo(name: String) = when {
-        name.endsWith(".mp4", true) || name.endsWith(".mov", true)
-            || name.endsWith(".mkv", true) || name.endsWith(".avi", true)
-            || name.endsWith(".webm", true) -> true
-        else -> false
-    }
+    private fun looksLikeVideo(name: String) =
+        when {
+            name.endsWith(".mp4", true) || name.endsWith(".mov", true) ||
+                name.endsWith(".mkv", true) || name.endsWith(".avi", true) ||
+                name.endsWith(".webm", true) -> true
+            else -> false
+        }
 
     // ---------- item actions ----------
 
@@ -425,19 +477,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         downloadItems(items) // exits selection mode when done
     }
 
-    private fun downloadItems(items: List<StashItem>) = viewModelScope.launch(Dispatchers.IO) {
-        val c = client ?: return@launch
-        var ok = 0
-        for (item in items) {
-            runCatching {
-                val path = c.download(item.fileId)
-                saveToGallery(File(path), item.fileName, item.isVideo)
-                ok++
+    private fun downloadItems(items: List<StashItem>) =
+        viewModelScope.launch(Dispatchers.IO) {
+            val c = client ?: return@launch
+            var ok = 0
+            for (item in items) {
+                runCatching {
+                    val path = c.download(item.fileId)
+                    saveToGallery(File(path), item.fileName, item.isVideo)
+                    ok++
+                }
             }
+            _toasts.tryEmit(if (items.size == 1) "Saved to gallery" else "Saved $ok to gallery")
+            exitSelectionMode()
         }
-        _toasts.tryEmit(if (items.size == 1) "Saved to gallery" else "Saved $ok to gallery")
-        exitSelectionMode()
-    }
 
     fun delete(item: StashItem) = deleteItems(listOf(item))
 
@@ -447,82 +500,105 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         deleteItems(items)
     }
 
-    private fun deleteItems(items: List<StashItem>) = viewModelScope.launch(Dispatchers.IO) {
-        val c = client ?: return@launch
-        if (items.isEmpty()) return@launch
-        runCatching {
-            items.groupBy { it.chatId }.forEach { (chat, list) ->
-                c.deleteMessages(chat, list.map { it.messageId }.toLongArray())
-            }
-            dao.deleteAll(items.map { it.messageId })
-            _toasts.tryEmit(if (items.size == 1) "Deleted" else "Deleted ${items.size} item(s)")
-        }.onFailure { e -> _toasts.tryEmit("Delete failed: ${e.message}") }
-        exitSelectionMode()
-    }
+    private fun deleteItems(items: List<StashItem>) =
+        viewModelScope.launch(Dispatchers.IO) {
+            val c = client ?: return@launch
+            if (items.isEmpty()) return@launch
+            runCatching {
+                items.groupBy { it.chatId }.forEach { (chat, list) ->
+                    c.deleteMessages(chat, list.map { it.messageId }.toLongArray())
+                }
+                dao.deleteAll(items.map { it.messageId })
+                _toasts.tryEmit(if (items.size == 1) "Deleted" else "Deleted ${items.size} item(s)")
+            }.onFailure { e -> _toasts.tryEmit("Delete failed: ${e.message}") }
+            exitSelectionMode()
+        }
 
-    private suspend fun saveToGallery(src: File, displayName: String, isVideo: Boolean) =
-        withContext(Dispatchers.IO) {
-            val app = getApplication<Application>()
-            val collection = if (isVideo)
+    private suspend fun saveToGallery(
+        src: File,
+        displayName: String,
+        isVideo: Boolean,
+    ) = withContext(Dispatchers.IO) {
+        val app = getApplication<Application>()
+        val collection =
+            if (isVideo) {
                 MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-            else
+            } else {
                 MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-            val values = ContentValues().apply {
+            }
+        val values =
+            ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
                 put(MediaStore.MediaColumns.MIME_TYPE, if (isVideo) "video/mp4" else guessMime(displayName))
             }
-            val uri = app.contentResolver.insert(collection, values)
+        val uri =
+            app.contentResolver.insert(collection, values)
                 ?: error("Could not create MediaStore entry")
-            app.contentResolver.openOutputStream(uri)?.use { out ->
-                src.inputStream().use { it.copyTo(out) }
-            } ?: error("Could not open output stream")
-        }
-
-    private fun guessMime(name: String) = when {
-        name.endsWith(".png", true) -> "image/png"
-        name.endsWith(".webp", true) -> "image/webp"
-        name.endsWith(".heic", true) || name.endsWith(".heif", true) -> "image/heic"
-        name.endsWith(".gif", true) -> "image/gif"
-        else -> "image/jpeg"
+        app.contentResolver.openOutputStream(uri)?.use { out ->
+            src.inputStream().use { it.copyTo(out) }
+        } ?: error("Could not open output stream")
     }
+
+    private fun guessMime(name: String) =
+        when {
+            name.endsWith(".png", true) -> "image/png"
+            name.endsWith(".webp", true) -> "image/webp"
+            name.endsWith(".heic", true) || name.endsWith(".heif", true) -> "image/heic"
+            name.endsWith(".gif", true) -> "image/gif"
+            else -> "image/jpeg"
+        }
 
     // ---------- settings / backup ----------
 
-    fun setAutoBackup(enabled: Boolean, wifiOnly: Boolean, chargingOnly: Boolean) =
+    fun setAutoBackup(
+        enabled: Boolean,
+        wifiOnly: Boolean,
+        chargingOnly: Boolean,
+    ) = viewModelScope.launch(Dispatchers.IO) {
+        settings.setAutoBackup(enabled)
+        settings.setWifiOnly(wifiOnly)
+        settings.setChargingOnly(chargingOnly)
+        scheduleBackup(enabled, wifiOnly, chargingOnly)
+        _toasts.tryEmit(if (enabled) "Auto-backup enabled" else "Auto-backup disabled")
+    }
+
+    fun setBackupFolders(folders: Set<String>) =
         viewModelScope.launch(Dispatchers.IO) {
-            settings.setAutoBackup(enabled)
-            settings.setWifiOnly(wifiOnly)
-            settings.setChargingOnly(chargingOnly)
-            scheduleBackup(enabled, wifiOnly, chargingOnly)
-            _toasts.tryEmit(if (enabled) "Auto-backup enabled" else "Auto-backup disabled")
+            settings.setBackupFolders(folders)
+            _toasts.tryEmit(
+                if (folders.isEmpty()) {
+                    "Backing up all folders"
+                } else {
+                    "Backing up ${folders.size} folder(s)"
+                },
+            )
         }
 
-    fun setBackupFolders(folders: Set<String>) = viewModelScope.launch(Dispatchers.IO) {
-        settings.setBackupFolders(folders)
-        _toasts.tryEmit(
-            if (folders.isEmpty()) "Backing up all folders"
-            else "Backing up ${folders.size} folder(s)"
-        )
-    }
+    fun setDedupe(enabled: Boolean) =
+        viewModelScope.launch(Dispatchers.IO) {
+            settings.setDedupeEnabled(enabled)
+        }
 
-    fun setDedupe(enabled: Boolean) = viewModelScope.launch(Dispatchers.IO) {
-        settings.setDedupeEnabled(enabled)
-    }
-
-    private fun scheduleBackup(enabled: Boolean, wifiOnly: Boolean, chargingOnly: Boolean) {
+    private fun scheduleBackup(
+        enabled: Boolean,
+        wifiOnly: Boolean,
+        chargingOnly: Boolean,
+    ) {
         val wm = WorkManager.getInstance(getApplication())
         if (!enabled) {
             wm.cancelUniqueWork(BackupWorker.PERIODIC)
             return
         }
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
-            .setRequiresCharging(chargingOnly)
-            .build()
-        val req = PeriodicWorkRequestBuilder<BackupWorker>(6, TimeUnit.HOURS)
-            .setConstraints(constraints)
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .build()
+        val constraints =
+            Constraints.Builder()
+                .setRequiredNetworkType(if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
+                .setRequiresCharging(chargingOnly)
+                .build()
+        val req =
+            PeriodicWorkRequestBuilder<BackupWorker>(BACKUP_INTERVAL_HOURS, TimeUnit.HOURS)
+                .setConstraints(constraints)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, BACKOFF_SECONDS, TimeUnit.SECONDS)
+                .build()
         wm.enqueueUniquePeriodicWork(BackupWorker.PERIODIC, ExistingPeriodicWorkPolicy.UPDATE, req)
     }
 
@@ -530,17 +606,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         WorkManager.getInstance(getApplication()).enqueueUniqueWork(
             "telestash-backup-now",
             ExistingWorkPolicy.REPLACE,
-            OneTimeWorkRequestBuilder<BackupWorker>().build()
+            OneTimeWorkRequestBuilder<BackupWorker>().build(),
         )
     }
 
-    fun logout() = viewModelScope.launch(Dispatchers.IO) {
-        client?.logout()
-        dao.clear()
-        TgClient.shutdown()
-        client = null
-        oldestLoaded = Long.MAX_VALUE
-        _gallery.value = GalleryUi()
-        _auth.value = AuthUi.Loading
-    }
+    fun logout() =
+        viewModelScope.launch(Dispatchers.IO) {
+            client?.logout()
+            dao.clear()
+            TgClient.shutdown()
+            client = null
+            oldestLoaded = Long.MAX_VALUE
+            _gallery.value = GalleryUi()
+            _auth.value = AuthUi.Loading
+        }
 }

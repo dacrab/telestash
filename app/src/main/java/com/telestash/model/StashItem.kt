@@ -32,8 +32,9 @@ data class StashItem(
                         fileId = c.document.document.id,
                         fileName = name,
                         sizeBytes = c.document.document.expectedSize,
-                        isVideo = mime.startsWith("video/") || name.endsWith(".mp4", true)
-                            || name.endsWith(".mov", true) || name.endsWith(".mkv", true),
+                        isVideo =
+                            mime.startsWith("video/") || name.endsWith(".mp4", true) ||
+                                name.endsWith(".mov", true) || name.endsWith(".mkv", true),
                         localPath = c.document.document.local.path.ifBlank { null },
                     )
                 }

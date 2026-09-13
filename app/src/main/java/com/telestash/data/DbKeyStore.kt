@@ -1,16 +1,15 @@
 package com.telestash.data
 
 import android.content.Context
-import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import java.security.KeyStore
 import java.security.SecureRandom
+import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.Cipher
 
 /**
  * Generates and stores the TDLib database encryption key wrapped by Android Keystore.
@@ -18,10 +17,13 @@ import javax.crypto.Cipher
  * only a Keystore-wrapped (AES/GCM) copy in app preferences.
  */
 object DbKeyStore {
-
     private const val KS_ALIAS = "telestash_tdlib_key"
     private const val PREFS = "telestash_secure"
     private const val PREF_KEY = "tdlib_key_wrapped"
+    private const val TDLIB_KEY_BYTES = 64
+    private const val AES_KEY_BITS = 256
+    private const val GCM_IV_BYTES = 12
+    private const val GCM_TAG_BITS = 128
 
     /**
      * Returns the raw TDLib database encryption key (64 random bytes).
@@ -33,15 +35,16 @@ object DbKeyStore {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val stored = prefs.getString(PREF_KEY, null)
 
-        val key: ByteArray = if (stored != null) {
-            unwrap(stored)
-        } else {
-            SecureRandom().let { r ->
-                ByteArray(64).also { r.nextBytes(it) }
-            }.also { fresh ->
-                prefs.edit().putString(PREF_KEY, wrap(fresh)).apply()
+        val key: ByteArray =
+            if (stored != null) {
+                unwrap(stored)
+            } else {
+                SecureRandom().let { r ->
+                    ByteArray(TDLIB_KEY_BYTES).also { r.nextBytes(it) }
+                }.also { fresh ->
+                    prefs.edit().putString(PREF_KEY, wrap(fresh)).apply()
+                }
             }
-        }
         return key
     }
 
@@ -53,13 +56,13 @@ object DbKeyStore {
         kg.init(
             KeyGenParameterSpec.Builder(
                 KS_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
             )
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
+                .setKeySize(AES_KEY_BITS)
                 .setRandomizedEncryptionRequired(true)
-                .build()
+                .build(),
         )
         return kg.generateKey()
     }
@@ -74,10 +77,10 @@ object DbKeyStore {
 
     private fun unwrap(stored: String): ByteArray {
         val all = Base64.decode(stored, Base64.NO_WRAP)
-        val iv = all.copyOfRange(0, 12)
-        val ct = all.copyOfRange(12, all.size)
+        val iv = all.copyOfRange(0, GCM_IV_BYTES)
+        val ct = all.copyOfRange(GCM_IV_BYTES, all.size)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, keystoreKey(), GCMParameterSpec(128, iv))
+        cipher.init(Cipher.DECRYPT_MODE, keystoreKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
         return cipher.doFinal(ct)
     }
 }

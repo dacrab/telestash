@@ -26,15 +26,21 @@ private object Keys {
 
 /** App settings backed by DataStore. */
 class SettingsRepository(private val context: Context) {
-
-    val credentials: Flow<Pair<Int, String>> = context.settings.data.map { p ->
-        (p[Keys.API_ID] ?: 0) to (p[Keys.API_HASH] ?: "")
-    }
+    val credentials: Flow<Pair<Int, String>> =
+        context.settings.data.map { p ->
+            (p[Keys.API_ID] ?: 0) to (p[Keys.API_HASH] ?: "")
+        }
 
     suspend fun credentialsOnce(): Pair<Int, String> = credentials.first()
 
-    suspend fun setCredentials(apiId: Int, apiHash: String) {
-        context.settings.edit { it[Keys.API_ID] = apiId; it[Keys.API_HASH] = apiHash }
+    suspend fun setCredentials(
+        apiId: Int,
+        apiHash: String,
+    ) {
+        context.settings.edit {
+            it[Keys.API_ID] = apiId
+            it[Keys.API_HASH] = apiHash
+        }
     }
 
     val autoBackup: Flow<Boolean> = context.settings.data.map { it[Keys.AUTO_BACKUP] ?: false }
@@ -42,10 +48,11 @@ class SettingsRepository(private val context: Context) {
     val chargingOnly: Flow<Boolean> = context.settings.data.map { it[Keys.CHARGING_ONLY] ?: false }
 
     /** Comma-separated MediaStore bucket names to back up; empty = all folders. */
-    val backupFolders: Flow<Set<String>> = context.settings.data.map { p ->
-        (p[Keys.BACKUP_FOLDERS] ?: "").split(",").map { it.trim() }
-            .filter { it.isNotBlank() }.toSet()
-    }
+    val backupFolders: Flow<Set<String>> =
+        context.settings.data.map { p ->
+            (p[Keys.BACKUP_FOLDERS] ?: "").split(",").map { it.trim() }
+                .filter { it.isNotBlank() }.toSet()
+        }
 
     suspend fun setBackupFolders(folders: Set<String>) {
         context.settings.edit { it[Keys.BACKUP_FOLDERS] = folders.joinToString(",") }

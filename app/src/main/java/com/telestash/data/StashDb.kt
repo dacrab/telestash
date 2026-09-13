@@ -72,7 +72,7 @@ interface ItemDao {
 @Database(
     entities = [ItemEntity::class, AlbumEntity::class],
     version = 2,
-    exportSchema = false
+    exportSchema = false,
 )
 abstract class StashDb : RoomDatabase() {
     abstract fun itemDao(): ItemDao
