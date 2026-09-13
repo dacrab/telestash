@@ -85,6 +85,7 @@ class AppViewModel(
         const val SCROLL_PRELOAD_THRESHOLD = 12
         const val BACKUP_INTERVAL_HOURS = 6L
         const val BACKOFF_SECONDS = 30L
+        private const val SECONDS_PER_MINUTE = 60
     }
 
     private val settings = SettingsRepository(app)
@@ -121,15 +122,16 @@ class AppViewModel(
             }
             val c = TgClient.getOrCreate(getApplication(), apiId, apiHash)
             client = c
+            // Subscribe before driving TDLib, so the initial auth-state burst
+            // (WaitTdlibParameters -> WaitPhoneNumber) can't slip past us.
+            observeGallery()
+            collectAuthStates(c)
             runCatching { c.start() }
                 .onFailure { e ->
                     _toasts.tryEmit("TDLib init failed: ${e.message}")
                     _auth.value = AuthUi.NeedCredentials
                     return@launch
                 }
-
-            observeGallery()
-            collectAuthStates(c)
         }
     }
 
@@ -232,7 +234,14 @@ class AppViewModel(
     private fun userError(e: Throwable): String {
         val msg = e.message ?: "unknown error"
         return if (e is TdException && e.isFloodWait) {
-            "Too many attempts. Wait ${e.floodWaitSeconds}s"
+            val secs = e.floodWaitSeconds
+            val wait =
+                if (secs >= SECONDS_PER_MINUTE) {
+                    "${secs / SECONDS_PER_MINUTE} min ${secs % SECONDS_PER_MINUTE}s"
+                } else {
+                    "${secs}s"
+                }
+            "Too many attempts. Telegram asks to wait $wait before retrying."
         } else {
             "Error: $msg"
         }

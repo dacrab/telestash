@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
+import java.io.File
 
 class TdException(
     val code: Int,
@@ -47,6 +48,8 @@ class TgClient private constructor(
         private const val TOPICS_COLLECTION_TIMEOUT_MS = 1_000L
         private const val TOPICS_PAGE_LIMIT = 100
         private const val DOWNLOAD_PRIORITY = 16
+        private const val LOG_MAX_SIZE_BYTES = 1L shl 22
+        private const val UPDATE_REPLAY_BUFFER = 32
 
         @Volatile private var instance: TgClient? = null
 
@@ -79,7 +82,9 @@ class TgClient private constructor(
 
     private val _updates =
         MutableSharedFlow<TdApi.Update>(
-            replay = 1,
+            // The startup burst (options + auth states) can exceed 1 replay slot
+            // before any subscriber attaches.
+            replay = UPDATE_REPLAY_BUFFER,
             extraBufferCapacity = 64,
             onBufferOverflow = BufferOverflow.DROP_OLDEST,
         )
@@ -99,7 +104,19 @@ class TgClient private constructor(
         )
 
     init {
-        runCatching { Client.execute(TdApi.SetLogVerbosityLevel(1)) }
+        runCatching { Client.execute(TdApi.SetLogVerbosityLevel(2)) }
+        runCatching {
+            val logDir = File("$tdlibDir-logs").apply { mkdirs() }
+            Client.execute(
+                TdApi.SetLogStream(
+                    TdApi.LogStreamFile(
+                        logDir.absolutePath + "/tdlib.log",
+                        LOG_MAX_SIZE_BYTES,
+                        false,
+                    ),
+                ),
+            )
+        }
     }
 
     /** Configure TDLib; safe to call exactly once per client instance. */
