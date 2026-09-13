@@ -17,7 +17,12 @@ class MainActivity : ComponentActivity() {
         // Force TDLib class init + native library load on the main thread exactly
         // once, before background threads can race Client.create() and deadlock
         // the class-initialization lock against the library load.
-        runCatching { Client.execute(org.drinkless.tdlib.TdApi.SetLogVerbosityLevel(0)) }
+        runCatching {
+            Client.execute(
+                org.drinkless.tdlib.TdApi
+                    .SetLogVerbosityLevel(0),
+            )
+        }
         val vm: AppViewModel by viewModels()
         setContent {
             TeleStashTheme {
