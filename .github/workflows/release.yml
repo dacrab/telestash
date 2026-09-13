@@ -28,12 +28,12 @@ jobs:
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
-        run: echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
+        run: echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/release.keystore"
 
       - name: Build release APK
         run: |
-          if [ -f release.keystore ]; then
-            export KEYSTORE_FILE=release.keystore
+          if [ -f "$GITHUB_WORKSPACE/release.keystore" ]; then
+            export KEYSTORE_FILE="$GITHUB_WORKSPACE/release.keystore"
             export KEYSTORE_PASSWORD="${{ secrets.KEYSTORE_PASSWORD }}"
             export KEY_ALIAS="${{ secrets.KEY_ALIAS }}"
             export KEY_PASSWORD="${{ secrets.KEY_PASSWORD }}"
