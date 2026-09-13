@@ -34,7 +34,7 @@ These are only stored on your device.
 
 ## Building from source
 
-Requirements: JDK 17+, Android SDK 35.
+Requirements: JDK 17+, Android SDK 37.
 
 ```bash
 ./gradlew assembleDebug

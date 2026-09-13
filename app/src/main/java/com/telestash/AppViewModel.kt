@@ -216,18 +216,27 @@ class AppViewModel(
 
     // ---------- auth actions ----------
 
-    fun submitPhone(phone: String) = vmIo { it.setPhone(phone.trim()) }
+    private val authBusy = MutableStateFlow(false)
+    val authBusyPublic: StateFlow<Boolean> = authBusy.asStateFlow()
 
-    fun submitCode(code: String) = vmIo { it.checkCode(code.trim()) }
+    fun submitPhone(phone: String) = authIo { it.setPhone(phone.trim()) }
 
-    fun submitPassword(pw: String) = vmIo { it.checkPassword(pw) }
+    fun submitCode(code: String) = authIo { it.checkCode(code.trim()) }
 
-    fun submitRegistration(name: String) = vmIo { it.registerUser(name.trim()) }
+    fun submitPassword(pw: String) = authIo { it.checkPassword(pw) }
 
-    private fun vmIo(block: suspend (TgClient) -> Unit) {
+    fun submitRegistration(name: String) = authIo { it.registerUser(name.trim()) }
+
+    /** Auth requests are one-at-a-time; Telegram rate-limits duplicate sends. */
+    private fun authIo(block: suspend (TgClient) -> Unit) {
         val c = client ?: return
+        if (!authBusy.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { block(c) }.onFailure { e -> _toasts.tryEmit(userError(e)) }
+            try {
+                runCatching { block(c) }.onFailure { e -> _toasts.tryEmit(userError(e)) }
+            } finally {
+                authBusy.value = false
+            }
         }
     }
 
