@@ -25,6 +25,9 @@ kotlin {
     }
 }
 
+// Release signing keystore provided by CI env; null locally.
+val ciKeystoreFile: String? = System.getenv("KEYSTORE_FILE")
+
 android {
     namespace = "com.telestash"
     compileSdk = 37
@@ -40,7 +43,7 @@ android {
     signingConfigs {
         create("release") {
             // Populated by CI (secrets -> env) for real releases.
-            System.getenv("KEYSTORE_FILE")?.let { storeFile = file(it) }
+            ciKeystoreFile?.let { storeFile = file(it) }
             storePassword = System.getenv("KEYSTORE_PASSWORD")
             keyAlias = System.getenv("KEY_ALIAS")
             keyPassword = System.getenv("KEY_PASSWORD")
@@ -52,7 +55,7 @@ android {
             isMinifyEnabled = false
             // Without CI signing secrets the APK is debug-signed so it stays installable.
             signingConfig =
-                if (System.getenv("KEYSTORE_FILE") != null) {
+                if (ciKeystoreFile != null) {
                     signingConfigs.getByName("release")
                 } else {
                     signingConfigs.getByName("debug")
@@ -75,18 +78,14 @@ android {
 
 dependencies {
     implementation(files("libs/core-release.aar"))
-    implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
-    implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons)
     implementation(libs.coil.compose)
-    implementation(libs.coil.video)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
@@ -96,6 +95,4 @@ dependencies {
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.ui)
     implementation(libs.zoomable)
-    implementation(libs.security.crypto)
-    debugImplementation(libs.androidx.ui.tooling)
 }

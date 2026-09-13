@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.AppViewModel
 import com.telestash.AuthUi
 
@@ -31,6 +32,7 @@ fun AuthScreen(
     vm: AppViewModel,
     state: AuthUi,
 ) {
+    val busy by vm.authBusyPublic.collectAsStateWithLifecycle()
     Column(
         modifier =
             Modifier
@@ -49,17 +51,20 @@ fun AuthScreen(
         Spacer(Modifier.height(32.dp))
 
         when (state) {
-            is AuthUi.Phone -> PhoneStep(vm)
-            is AuthUi.Code -> CodeStep(vm, state.hint)
-            is AuthUi.Password -> PasswordStep(vm, state.hint)
-            is AuthUi.Registration -> RegistrationStep(vm)
+            is AuthUi.Phone -> PhoneStep(vm, busy)
+            is AuthUi.Code -> CodeStep(vm, busy, state.hint)
+            is AuthUi.Password -> PasswordStep(vm, busy, state.hint)
+            is AuthUi.Registration -> RegistrationStep(vm, busy)
             else -> CircularProgressIndicator()
         }
     }
 }
 
 @Composable
-private fun PhoneStep(vm: AppViewModel) {
+private fun PhoneStep(
+    vm: AppViewModel,
+    busy: Boolean,
+) {
     var phone by remember { mutableStateOf("") }
     OutlinedTextField(
         value = phone,
@@ -73,14 +78,15 @@ private fun PhoneStep(vm: AppViewModel) {
     Spacer(Modifier.height(16.dp))
     Button(
         onClick = { vm.submitPhone(phone) },
-        enabled = phone.isNotBlank(),
+        enabled = phone.isNotBlank() && !busy,
         modifier = Modifier.fillMaxWidth(),
-    ) { Text("Continue") }
+    ) { Text(if (busy) "Sending..." else "Continue") }
 }
 
 @Composable
 private fun CodeStep(
     vm: AppViewModel,
+    busy: Boolean,
     hint: String,
 ) {
     var code by remember { mutableStateOf("") }
@@ -97,14 +103,15 @@ private fun CodeStep(
     Spacer(Modifier.height(16.dp))
     Button(
         onClick = { vm.submitCode(code) },
-        enabled = code.isNotBlank(),
+        enabled = code.isNotBlank() && !busy,
         modifier = Modifier.fillMaxWidth(),
-    ) { Text("Verify") }
+    ) { Text(if (busy) "Checking..." else "Verify") }
 }
 
 @Composable
 private fun PasswordStep(
     vm: AppViewModel,
+    busy: Boolean,
     hint: String,
 ) {
     var pw by remember { mutableStateOf("") }
@@ -122,13 +129,16 @@ private fun PasswordStep(
     Spacer(Modifier.height(16.dp))
     Button(
         onClick = { vm.submitPassword(pw) },
-        enabled = pw.isNotBlank(),
+        enabled = pw.isNotBlank() && !busy,
         modifier = Modifier.fillMaxWidth(),
     ) { Text("Unlock") }
 }
 
 @Composable
-private fun RegistrationStep(vm: AppViewModel) {
+private fun RegistrationStep(
+    vm: AppViewModel,
+    busy: Boolean,
+) {
     var name by remember { mutableStateOf("") }
     OutlinedTextField(
         value = name,
@@ -140,7 +150,7 @@ private fun RegistrationStep(vm: AppViewModel) {
     Spacer(Modifier.height(16.dp))
     Button(
         onClick = { vm.submitRegistration(name) },
-        enabled = name.isNotBlank(),
+        enabled = name.isNotBlank() && !busy,
         modifier = Modifier.fillMaxWidth(),
     ) { Text("Create account") }
 }
