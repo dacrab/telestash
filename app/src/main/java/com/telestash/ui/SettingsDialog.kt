@@ -59,16 +59,17 @@ fun SettingsDialog(
                 MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL),
                 MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL),
             ).forEach { uri ->
-                cr.query(
-                    uri,
-                    arrayOf(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME),
-                    null,
-                    null,
-                    null,
-                )?.use { c ->
-                    val col = c.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
-                    while (c.moveToNext()) c.getString(col)?.let { deviceFolders.add(it) }
-                }
+                cr
+                    .query(
+                        uri,
+                        arrayOf(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME),
+                        null,
+                        null,
+                        null,
+                    )?.use { c ->
+                        val col = c.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+                        while (c.moveToNext()) c.getString(col)?.let { deviceFolders.add(it) }
+                    }
             }
         }
     }

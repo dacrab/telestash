@@ -19,13 +19,13 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
@@ -229,7 +229,7 @@ private fun MainTopBar(
                     Icon(Icons.Filled.Settings, contentDescription = "Settings")
                 }
                 IconButton(onClick = onLogout) {
-                    Icon(Icons.Filled.Logout, contentDescription = "Log out")
+                    Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Log out")
                 }
             }
         },
@@ -246,7 +246,7 @@ private fun AlbumTopBar(
         title = { Text(albumName ?: "Album") },
         navigationIcon = {
             IconButton(onClick = onBack) {
-                Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
         },
     )
@@ -403,8 +403,7 @@ private fun groupByMonth(items: List<StashItem>): List<Pair<String, List<StashIt
         .groupBy { item ->
             cal.timeInMillis = item.date * MILLIS_PER_SECOND
             fmt.format(cal.time)
-        }
-        .map { (k, v) -> k to v }
+        }.map { (k, v) -> k to v }
 }
 
 @Composable

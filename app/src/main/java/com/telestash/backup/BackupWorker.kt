@@ -23,7 +23,10 @@ import java.io.File
  * documents to Saved Messages. Dedupes by MediaStore uri (Room) and optional
  * perceptual hash (near-duplicate images).
  */
-class BackupWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+class BackupWorker(
+    ctx: Context,
+    params: WorkerParameters,
+) : CoroutineWorker(ctx, params) {
     companion object {
         const val PERIODIC = "telestash-backup"
     }
@@ -163,5 +166,10 @@ class BackupWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx
     }
 
     /** A device media item pending backup. */
-    private data class MediaItem(val uri: Uri, val displayName: String, val size: Long, val isVideo: Boolean)
+    private data class MediaItem(
+        val uri: Uri,
+        val displayName: String,
+        val size: Long,
+        val isVideo: Boolean,
+    )
 }

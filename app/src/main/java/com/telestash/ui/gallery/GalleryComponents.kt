@@ -170,8 +170,7 @@ fun GalleryCell(
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick,
-            )
-            .then(
+            ).then(
                 if (selected) {
                     Modifier.background(
                         MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),

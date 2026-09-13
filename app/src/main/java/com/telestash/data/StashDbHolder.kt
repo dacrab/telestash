@@ -9,13 +9,14 @@ object StashDbHolder {
 
     fun db(context: Context): StashDb =
         db ?: synchronized(this) {
-            db ?: Room.databaseBuilder(
-                context.applicationContext,
-                StashDb::class.java,
-                "stash.db",
-            )
+            db ?: Room
+                .databaseBuilder(
+                    context.applicationContext,
+                    StashDb::class.java,
+                    "stash.db",
+                )
                 // v2 added phash/topicId to a cache-only db: drop & rebuild is fine
-                .fallbackToDestructiveMigration()
+                .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()
                 .also { db = it }
         }

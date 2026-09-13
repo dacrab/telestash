@@ -33,9 +33,13 @@ data class StashItem(
                         fileName = name,
                         sizeBytes = c.document.document.expectedSize,
                         isVideo =
-                            mime.startsWith("video/") || name.endsWith(".mp4", true) ||
-                                name.endsWith(".mov", true) || name.endsWith(".mkv", true),
-                        localPath = c.document.document.local.path.ifBlank { null },
+                            mime.startsWith("video/") ||
+                                name.endsWith(".mp4", true) ||
+                                name.endsWith(".mov", true) ||
+                                name.endsWith(".mkv", true),
+                        localPath =
+                            c.document.document.local.path
+                                .ifBlank { null },
                     )
                 }
                 is TdApi.MessagePhoto -> {
@@ -48,7 +52,9 @@ data class StashItem(
                         fileName = "photo_${msg.id}.jpg",
                         sizeBytes = biggest.photo.expectedSize,
                         isVideo = false,
-                        localPath = biggest.photo.local.path.ifBlank { null },
+                        localPath =
+                            biggest.photo.local.path
+                                .ifBlank { null },
                     )
                 }
                 is TdApi.MessageVideo -> {
@@ -60,7 +66,9 @@ data class StashItem(
                         fileName = c.video.fileName.ifBlank { "video_${msg.id}.mp4" },
                         sizeBytes = c.video.video.expectedSize,
                         isVideo = true,
-                        localPath = c.video.video.local.path.ifBlank { null },
+                        localPath =
+                            c.video.video.local.path
+                                .ifBlank { null },
                     )
                 }
                 else -> null
