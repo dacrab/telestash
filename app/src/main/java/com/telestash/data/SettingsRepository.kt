@@ -25,7 +25,9 @@ private object Keys {
 }
 
 /** App settings backed by DataStore. */
-class SettingsRepository(private val context: Context) {
+class SettingsRepository(
+    private val context: Context,
+) {
     val credentials: Flow<Pair<Int, String>> =
         context.settings.data.map { p ->
             (p[Keys.API_ID] ?: 0) to (p[Keys.API_HASH] ?: "")
@@ -50,8 +52,11 @@ class SettingsRepository(private val context: Context) {
     /** Comma-separated MediaStore bucket names to back up; empty = all folders. */
     val backupFolders: Flow<Set<String>> =
         context.settings.data.map { p ->
-            (p[Keys.BACKUP_FOLDERS] ?: "").split(",").map { it.trim() }
-                .filter { it.isNotBlank() }.toSet()
+            (p[Keys.BACKUP_FOLDERS] ?: "")
+                .split(",")
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .toSet()
         }
 
     suspend fun setBackupFolders(folders: Set<String>) {

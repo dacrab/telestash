@@ -39,11 +39,12 @@ object DbKeyStore {
             if (stored != null) {
                 unwrap(stored)
             } else {
-                SecureRandom().let { r ->
-                    ByteArray(TDLIB_KEY_BYTES).also { r.nextBytes(it) }
-                }.also { fresh ->
-                    prefs.edit().putString(PREF_KEY, wrap(fresh)).apply()
-                }
+                SecureRandom()
+                    .let { r ->
+                        ByteArray(TDLIB_KEY_BYTES).also { r.nextBytes(it) }
+                    }.also { fresh ->
+                        prefs.edit().putString(PREF_KEY, wrap(fresh)).apply()
+                    }
             }
         return key
     }
@@ -54,11 +55,11 @@ object DbKeyStore {
 
         val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
         kg.init(
-            KeyGenParameterSpec.Builder(
-                KS_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            KeyGenParameterSpec
+                .Builder(
+                    KS_ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(AES_KEY_BITS)
                 .setRandomizedEncryptionRequired(true)

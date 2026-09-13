@@ -50,9 +50,13 @@ sealed interface AuthUi {
 
     data object Phone : AuthUi
 
-    data class Code(val hint: String) : AuthUi
+    data class Code(
+        val hint: String,
+    ) : AuthUi
 
-    data class Password(val hint: String) : AuthUi
+    data class Password(
+        val hint: String,
+    ) : AuthUi
 
     data object Registration : AuthUi
 
@@ -70,7 +74,9 @@ data class GalleryUi(
     val openTopicId: Long = 0L,
 )
 
-class AppViewModel(app: Application) : AndroidViewModel(app) {
+class AppViewModel(
+    app: Application,
+) : AndroidViewModel(app) {
     companion object {
         const val MIN_API_HASH_LENGTH = 8
         const val HISTORY_PAGE_SIZE = 100
@@ -131,13 +137,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private fun observeGallery() {
         viewModelScope.launch {
-            _gallery.flatMapLatest { g ->
-                if (g.openTopicId == 0L) dao.observeMainItems() else dao.observeTopic(g.openTopicId)
-            }.collect { entities ->
-                _gallery.value = _gallery.value.copy(items = entities.map { it.toStashItem() })
-                val min = entities.minOfOrNull { it.messageId } ?: Long.MAX_VALUE
-                if (min < oldestLoaded) oldestLoaded = min
-            }
+            _gallery
+                .flatMapLatest { g ->
+                    if (g.openTopicId == 0L) dao.observeMainItems() else dao.observeTopic(g.openTopicId)
+                }.collect { entities ->
+                    _gallery.value = _gallery.value.copy(items = entities.map { it.toStashItem() })
+                    val min = entities.minOfOrNull { it.messageId } ?: Long.MAX_VALUE
+                    if (min < oldestLoaded) oldestLoaded = min
+                }
         }
         viewModelScope.launch {
             dao.observeAlbums().collect { albums ->
@@ -377,7 +384,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun selectAll() {
-        _gallery.value = _gallery.value.copy(selected = _gallery.value.items.map { it.messageId }.toSet())
+        _gallery.value =
+            _gallery.value.copy(
+                selected =
+                    _gallery.value.items
+                        .map { it.messageId }
+                        .toSet(),
+            )
     }
 
     // ---------- uploads ----------
@@ -456,13 +469,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         resolver: android.content.ContentResolver,
         uri: Uri,
     ): String? =
-        resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
+        resolver
+            .query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
             ?.use { csr -> if (csr.moveToFirst()) csr.getString(0) else null }
 
     private fun looksLikeVideo(name: String) =
         when {
-            name.endsWith(".mp4", true) || name.endsWith(".mov", true) ||
-                name.endsWith(".mkv", true) || name.endsWith(".avi", true) ||
+            name.endsWith(".mp4", true) ||
+                name.endsWith(".mov", true) ||
+                name.endsWith(".mkv", true) ||
+                name.endsWith(".avi", true) ||
                 name.endsWith(".webm", true) -> true
             else -> false
         }
@@ -590,7 +606,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val constraints =
-            Constraints.Builder()
+            Constraints
+                .Builder()
                 .setRequiredNetworkType(if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
                 .setRequiresCharging(chargingOnly)
                 .build()

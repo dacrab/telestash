@@ -18,7 +18,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 
-class TdException(val code: Int, override val message: String) : Exception(message) {
+class TdException(
+    val code: Int,
+    override val message: String,
+) : Exception(message) {
     val isFloodWait: Boolean get() = message.startsWith("FLOOD_WAIT_")
     val floodWaitSeconds: Long
         get() =

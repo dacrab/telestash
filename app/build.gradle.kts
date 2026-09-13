@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
     alias(libs.plugins.ktlint)
@@ -20,9 +19,15 @@ ktlint {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
 android {
     namespace = "com.telestash"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.telestash"
@@ -32,17 +37,31 @@ android {
         versionName = "0.3.0"
     }
 
+    signingConfigs {
+        create("release") {
+            // Populated by CI (secrets -> env) for real releases.
+            System.getenv("KEYSTORE_FILE")?.let { storeFile = file(it) }
+            storePassword = System.getenv("KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("KEY_ALIAS")
+            keyPassword = System.getenv("KEY_PASSWORD")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Without CI signing secrets the APK is debug-signed so it stays installable.
+            signingConfig =
+                if (System.getenv("KEYSTORE_FILE") != null) {
+                    signingConfigs.getByName("release")
+                } else {
+                    signingConfigs.getByName("debug")
+                }
         }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
     }
     buildFeatures {
         compose = true
