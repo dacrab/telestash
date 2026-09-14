@@ -10,7 +10,7 @@ Everything stays **yours** — your Telegram account, your files, no middleman s
 
 ## What it does
 
-- **Automatic backup** — new photos and videos upload on their own (every ~6 hours), optionally only on Wi-Fi and while charging. You pick which folders are included, and exact duplicates are skipped automatically.
+- **Automatic backup** — new photos and videos upload on their own (every ~6 hours, or instantly as they're detected), optionally only on Wi-Fi and while charging. Folders with media are auto-detected so you pick which ones to include, and exact duplicates are skipped automatically.
 - **Familiar gallery** — a grid of your backed-up media with month headers like Google Photos, pinch-to-zoom full-screen viewer, and video playback.
 - **Albums** — organize photos into albums; select a bunch and move them in one tap.
 - **Multi-select** — long-press to select, then download or delete in bulk.

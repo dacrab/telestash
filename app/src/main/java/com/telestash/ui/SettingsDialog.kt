@@ -1,12 +1,18 @@
 package com.telestash.ui
 
-import android.provider.MediaStore
+import android.Manifest.permission.READ_EXTERNAL_STORAGE
+import android.Manifest.permission.READ_MEDIA_IMAGES
+import android.Manifest.permission.READ_MEDIA_VIDEO
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -28,6 +34,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.AppViewModel
+import com.telestash.device.DeviceFolder
+import com.telestash.device.DeviceMedia
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsDialog(
@@ -38,40 +48,53 @@ fun SettingsDialog(
     val wifiOnly by vm.wifiOnly.collectAsStateWithLifecycle(initialValue = true)
     val chargingOnly by vm.chargingOnly.collectAsStateWithLifecycle(initialValue = false)
     val dedupe by vm.dedupeEnabled.collectAsStateWithLifecycle(initialValue = true)
+    val instant by vm.instantUpload.collectAsStateWithLifecycle(initialValue = false)
     val savedFolders by vm.backupFolders.collectAsStateWithLifecycle(initialValue = emptySet())
 
     var backup by remember { mutableStateOf(autoBackup) }
     var wifi by remember { mutableStateOf(wifiOnly) }
     var charging by remember { mutableStateOf(chargingOnly) }
     var dedupeOn by remember { mutableStateOf(dedupe) }
+    var instantOn by remember { mutableStateOf(instant) }
     val chosenFolders = remember { mutableStateListOf<String>() }
+
+    // DataStore emits after first composition; sync real values into the local
+    // editing state as they arrive, or "Save" would overwrite with placeholders.
+    LaunchedEffect(autoBackup, wifiOnly, chargingOnly, dedupe, instant) {
+        backup = autoBackup
+        wifi = wifiOnly
+        charging = chargingOnly
+        dedupeOn = dedupe
+        instantOn = instant
+    }
     LaunchedEffect(savedFolders) {
         chosenFolders.clear()
         chosenFolders.addAll(savedFolders)
     }
 
     val context = LocalContext.current
-    val deviceFolders = remember { mutableStateListOf<String>() }
+    val deviceFolders = remember { mutableStateListOf<DeviceFolder>() }
+
+    val permissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+    val neededPermissions =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(READ_MEDIA_IMAGES, READ_MEDIA_VIDEO)
+        } else {
+            arrayOf(READ_EXTERNAL_STORAGE)
+        }
+
+    // Auto-detected folders (with media counts), like Google Photos' backup list.
     LaunchedEffect(Unit) {
         runCatching {
-            val cr = context.contentResolver
-            listOf(
-                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL),
-                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL),
-            ).forEach { uri ->
-                cr
-                    .query(
-                        uri,
-                        arrayOf(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME),
-                        null,
-                        null,
-                        null,
-                    )?.use { c ->
-                        val col = c.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
-                        while (c.moveToNext()) c.getString(col)?.let { deviceFolders.add(it) }
-                    }
-            }
+            withContext(Dispatchers.IO) { DeviceMedia.folders(context) }
+        }.onSuccess { folders ->
+            deviceFolders.clear()
+            deviceFolders.addAll(folders)
         }
+    }
+    LaunchedEffect(backup) {
+        if (backup) permissionLauncher.launch(neededPermissions)
     }
 
     AlertDialog(
@@ -87,35 +110,46 @@ fun SettingsDialog(
                 SettingRow("Only when charging") {
                     Checkbox(enabled = backup, checked = charging, onCheckedChange = { charging = it })
                 }
+                SettingRow("Upload new media instantly") {
+                    Switch(
+                        enabled = backup,
+                        checked = instantOn,
+                        onCheckedChange = { instantOn = it },
+                    )
+                }
                 SettingRow("Skip duplicate photos") {
                     Switch(checked = dedupeOn, onCheckedChange = { dedupeOn = it })
                 }
 
                 if (deviceFolders.isNotEmpty()) {
                     Spacer(Modifier.height(12.dp))
-                    Text("Backup folders (none = all)", style = MaterialTheme.typography.titleSmall)
-                    LazyColumn(Modifier.heightIn(max = 160.dp)) {
-                        items(deviceFolders.distinct().sorted()) { folder ->
-                            SettingRow(folder) {
-                                Checkbox(
-                                    enabled = backup,
-                                    checked = folder in chosenFolders,
-                                    onCheckedChange = { checked ->
-                                        if (checked) {
-                                            chosenFolders.add(folder)
-                                        } else {
-                                            chosenFolders.remove(folder)
-                                        }
-                                    },
-                                )
-                            }
+                    Text(
+                        "Backup folders (none selected = all)",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    LazyColumn(Modifier.heightIn(max = 200.dp)) {
+                        items(deviceFolders, key = { it.name }) { folder ->
+                            FolderRow(
+                                folder = folder,
+                                enabled = backup,
+                                checked = folder.name in chosenFolders,
+                                onCheckedChange = { checked ->
+                                    if (checked) {
+                                        chosenFolders.add(folder.name)
+                                    } else {
+                                        chosenFolders.remove(folder.name)
+                                    }
+                                },
+                            )
                         }
                     }
                 }
 
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Auto-backup runs every ~6 hours in the background.",
+                    "Backs up the photos and videos in the chosen folders the first time, " +
+                        "then new ones upload automatically" +
+                        if (instantOn) " as soon as they're detected." else " every ~6 hours.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -126,6 +160,7 @@ fun SettingsDialog(
                 vm.setDedupe(dedupeOn)
                 vm.setBackupFolders(chosenFolders.toSet())
                 vm.setAutoBackup(backup, wifi, charging)
+                vm.setInstantUpload(instantOn)
                 onDismiss()
             }) { Text("Save") }
         },
@@ -149,5 +184,34 @@ private fun SettingRow(
     ) {
         Text(label, Modifier.weight(1f), maxLines = 1)
         trailing()
+    }
+}
+
+/** A folder row: name, "N photos · M videos" count, and backup checkbox. */
+@Composable
+private fun FolderRow(
+    folder: DeviceFolder,
+    enabled: Boolean,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(folder.name, maxLines = 1)
+            if (folder.totalCount > 0) {
+                Text(
+                    folder.countLabel(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Checkbox(enabled = enabled, checked = checked, onCheckedChange = onCheckedChange)
     }
 }

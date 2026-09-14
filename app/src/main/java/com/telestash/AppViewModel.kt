@@ -19,6 +19,9 @@ import com.telestash.data.AlbumEntity
 import com.telestash.data.ItemEntity
 import com.telestash.data.SettingsRepository
 import com.telestash.data.StashDbHolder
+import com.telestash.device.DeviceMedia
+import com.telestash.device.NewMediaWatcher
+import com.telestash.device.PendingMedia
 import com.telestash.model.StashItem
 import com.telestash.model.messageToEntity
 import com.telestash.model.toEntity
@@ -38,6 +41,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.drinkless.tdlib.TdApi
 import java.io.File
@@ -68,10 +73,14 @@ data class GalleryUi(
     val albums: List<AlbumEntity> = emptyList(),
     val loadingMore: Boolean = false,
     val syncing: Boolean = false,
+    /** Upload progress: done count out of total, null = not uploading. */
+    val uploadProgress: Pair<Int, Int>? = null,
     /** Non-null = multi-select mode active with these message ids. */
     val selected: Set<Long>? = null,
     /** 0 = main gallery; otherwise the open album topic id. */
     val openTopicId: Long = 0L,
+    /** New device media detected; count > 0 shows the "new media" banner. */
+    val newMediaCount: Int = 0,
 )
 
 class AppViewModel(
@@ -81,10 +90,11 @@ class AppViewModel(
         const val MIN_API_HASH_LENGTH = 8
         const val HISTORY_PAGE_SIZE = 100
         const val SYNC_MAX_ITEMS = 1000
-        const val PICK_LIMIT = 20
+        const val PICK_LIMIT = 100
         const val SCROLL_PRELOAD_THRESHOLD = 12
         const val BACKUP_INTERVAL_HOURS = 6L
         const val BACKOFF_SECONDS = 30L
+        const val MAX_FAILED_NAMES_IN_TOAST = 3
         private const val SECONDS_PER_MINUTE = 60
     }
 
@@ -103,12 +113,21 @@ class AppViewModel(
     private var client: TgClient? = null
     private var oldestLoaded = Long.MAX_VALUE
     private var started = false
+    private val newMediaWatcher =
+        NewMediaWatcher(getApplication(), viewModelScope) { count, autoUpload ->
+            if (autoUpload) {
+                uploadPending()
+            } else {
+                _gallery.value = _gallery.value.copy(newMediaCount = count)
+            }
+        }
 
     val autoBackup = settings.autoBackup
     val wifiOnly = settings.wifiOnly
     val chargingOnly = settings.chargingOnly
     val backupFolders = settings.backupFolders
     val dedupeEnabled = settings.dedupeEnabled
+    val instantUpload = settings.instantUpload
 
     /** Start (or restart after credentials change) the TDLib client + collectors. */
     fun start() {
@@ -174,6 +193,8 @@ class AppViewModel(
                     is TdApi.AuthorizationStateReady -> {
                         _auth.value = AuthUi.Ready
                         runCatching { syncAll() }
+                        // Watch for new camera-roll media while signed in.
+                        newMediaWatcher.start()
                     }
                     else -> Unit
                 }
@@ -380,7 +401,7 @@ class AppViewModel(
                     listOf(AlbumEntity(topicId, newAlbumName, System.currentTimeMillis())),
                 )
             }
-            _toasts.tryEmit("Added to album")
+            _toasts.tryEmit("Moved to album")
         }.onFailure { e -> _toasts.tryEmit("Move failed: ${e.message}") }
         exitSelectionMode()
     }
@@ -402,39 +423,146 @@ class AppViewModel(
     }
 
     fun selectAll() {
-        _gallery.value =
-            _gallery.value.copy(
-                selected =
-                    _gallery.value.items
-                        .map { it.messageId }
-                        .toSet(),
-            )
+        val items = _gallery.value.items
+        _gallery.value = _gallery.value.copy(selected = items.map { it.messageId }.toSet())
+        if (items.size < SYNC_MAX_ITEMS) return
+        // Endless scroll means "all" is really "all loaded so far".
+        _toasts.tryEmit("Selected ${items.size} loaded items - scroll down to load more")
     }
 
     // ---------- uploads ----------
 
     private enum class UploadOutcome { UPLOADED, SKIPPED_DUPLICATE, FAILED }
 
+    private val uploadMutex = Mutex()
+
+    /** Dismiss the "new media detected" banner without uploading. */
+    fun dismissNewMedia() {
+        _gallery.value = _gallery.value.copy(newMediaCount = 0)
+    }
+
+    /**
+     * Upload every not-yet-backed-up device media item (used by the new-media
+     * banner, instant upload, and the backup worker when the app is running).
+     */
+    fun uploadPending() {
+        if (_gallery.value.uploadProgress != null) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val c = client ?: return@launch
+            val daoRef = dao
+            val allowed = settings.backupFolders.first()
+            val known = daoRef.allDeviceUris().toSet()
+            val pending = DeviceMedia.pending(getApplication(), known, allowed)
+            _gallery.value = _gallery.value.copy(newMediaCount = 0)
+            if (pending.isEmpty()) return@launch
+            uploadMutex.withLock {
+                val dedupe = settings.dedupeEnabled.first()
+                var failed = 0
+                val failedNames = mutableListOf<String>()
+
+                pending.forEachIndexed { i, item ->
+                    _gallery.value = _gallery.value.copy(uploadProgress = i to pending.size)
+                    when (uploadPendingOne(c, daoRef, item, dedupe)) {
+                        UploadOutcome.UPLOADED -> Unit
+                        UploadOutcome.SKIPPED_DUPLICATE -> Unit
+                        UploadOutcome.FAILED -> {
+                            failed++
+                            failedNames.add(item.displayName)
+                        }
+                    }
+                }
+                _gallery.value = _gallery.value.copy(uploadProgress = null)
+
+                if (failed > 0) {
+                    val sample = failedNames.take(MAX_FAILED_NAMES_IN_TOAST).joinToString()
+                    val msg =
+                        if (failed == pending.size) {
+                            "Backup failed: $sample"
+                        } else {
+                            "Backed up ${pending.size - failed}, failed $failed: $sample"
+                        }
+                    _toasts.tryEmit(msg)
+                } else {
+                    _toasts.tryEmit("Backed up ${pending.size} new item(s)")
+                }
+            }
+        }
+    }
+
+    /** Backup one device media item; returns UPLOADED, SKIPPED (dupe) or FAILED. */
+    private suspend fun uploadPendingOne(
+        c: TgClient,
+        dao: com.telestash.data.ItemDao,
+        item: PendingMedia,
+        dedupe: Boolean,
+    ): UploadOutcome {
+        val staged = stageUri(item.uri) ?: return UploadOutcome.FAILED
+        try {
+            var phash = 0L
+            if (dedupe && !item.isVideo) {
+                phash = PerceptualHash.compute(staged) ?: 0L
+                if (phash != 0L && dao.allPhashes().any { PerceptualHash.isProbablyDuplicate(it, phash) }) {
+                    // record without uploading so this uri is never re-scanned
+                    dao.upsertAll(listOf(item.markerEntity()))
+                    return UploadOutcome.SKIPPED_DUPLICATE
+                }
+            }
+            val msg = c.uploadDocument(staged.absolutePath, item.displayName)
+            StashItem.fromMessage(msg)?.let {
+                dao.upsertAll(listOf(it.toEntity(deviceUri = item.uri.toString(), phash = phash)))
+            }
+            return UploadOutcome.UPLOADED
+        } catch (_: Exception) {
+            return UploadOutcome.FAILED
+        } finally {
+            staged.delete()
+        }
+    }
+
+    /** Synthetic Room row marking a perceptual duplicate as "handled". */
+    private fun PendingMedia.markerEntity() =
+        com.telestash.data.ItemEntity(
+            messageId = -uri.hashCode().toLong(),
+            chatId = 0L,
+            date = 0,
+            fileId = 0,
+            fileName = displayName,
+            sizeBytes = sizeBytes,
+            isVideo = isVideo,
+            localPath = null,
+            deviceUri = uri.toString(),
+            phash = 0L,
+        )
+
     fun upload(
         uris: List<Uri>,
         topicId: Long = 0L,
     ) = viewModelScope.launch(Dispatchers.IO) {
         val c = client ?: return@launch
-        val dedupe = settings.dedupeEnabled.first()
+        uploadMutex.withLock {
+            val dedupe = settings.dedupeEnabled.first()
+            var failed = 0
+            val failedNames = mutableListOf<String>()
 
-        val outcomes = uris.map { uri -> runCatching { uploadOne(c, uri, topicId, dedupe) } }
-        val ok = outcomes.count { it.getOrNull() == UploadOutcome.UPLOADED }
-        val skipped = outcomes.count { it.getOrNull() == UploadOutcome.SKIPPED_DUPLICATE }
-        val failed = outcomes.size - ok - skipped
+            uris.forEachIndexed { i, uri ->
+                _gallery.value = _gallery.value.copy(uploadProgress = i to uris.size)
+                if (uploadOne(c, uri, topicId, dedupe) == UploadOutcome.FAILED) {
+                    failed++
+                    failedNames.add(queryDisplayName(getApplication(), uri) ?: "file ${i + 1}")
+                }
+            }
+            _gallery.value = _gallery.value.copy(uploadProgress = null)
 
-        _toasts.tryEmit(
-            when {
-                skipped > 0 && failed > 0 -> "Uploaded $ok, skipped $skipped duplicates, failed $failed"
-                skipped > 0 -> "Uploaded $ok, skipped $skipped duplicates"
-                failed > 0 -> "Uploaded $ok, failed $failed"
-                else -> "Uploaded $ok file(s)"
-            },
-        )
+            val ok = uris.size - failed
+            val failedSample = failedNames.take(MAX_FAILED_NAMES_IN_TOAST).joinToString()
+            _toasts.tryEmit(
+                when {
+                    failed == 0 -> "Uploaded ${uris.size} file(s)"
+                    ok > 0 -> "Uploaded $ok, failed $failed: $failedSample"
+                    else -> "Upload failed: $failedSample"
+                },
+            )
+        }
     }
 
     private suspend fun uploadOne(
@@ -556,9 +684,9 @@ class AppViewModel(
         val app = getApplication<Application>()
         val collection =
             if (isVideo) {
-                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                DeviceMedia.videoCollectionPrimary()
             } else {
-                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                DeviceMedia.imageCollectionPrimary()
             }
         val values =
             ContentValues().apply {
@@ -613,6 +741,12 @@ class AppViewModel(
             settings.setDedupeEnabled(enabled)
         }
 
+    fun setInstantUpload(enabled: Boolean) =
+        viewModelScope.launch(Dispatchers.IO) {
+            settings.setInstantUpload(enabled)
+            if (enabled) uploadPending()
+        }
+
     private fun scheduleBackup(
         enabled: Boolean,
         wifiOnly: Boolean,
@@ -638,6 +772,7 @@ class AppViewModel(
     }
 
     fun backupNow() {
+        _toasts.tryEmit("Backing up now...")
         WorkManager.getInstance(getApplication()).enqueueUniqueWork(
             "telestash-backup-now",
             ExistingWorkPolicy.REPLACE,
@@ -647,6 +782,7 @@ class AppViewModel(
 
     fun logout() =
         viewModelScope.launch(Dispatchers.IO) {
+            newMediaWatcher.stop()
             client?.logout()
             dao.clear()
             TgClient.shutdown()

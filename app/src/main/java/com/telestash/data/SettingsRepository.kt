@@ -22,6 +22,7 @@ private object Keys {
     val CHARGING_ONLY = booleanPreferencesKey("backup_charging_only")
     val BACKUP_FOLDERS = stringPreferencesKey("backup_folders")
     val DEDUPE = booleanPreferencesKey("dedupe_enabled")
+    val INSTANT_UPLOAD = booleanPreferencesKey("instant_upload_enabled")
 }
 
 /** App settings backed by DataStore. */
@@ -64,6 +65,13 @@ class SettingsRepository(
     }
 
     val dedupeEnabled: Flow<Boolean> = context.settings.data.map { it[Keys.DEDUPE] ?: true }
+
+    /** Upload newly detected media immediately instead of waiting for the periodic pass. */
+    val instantUpload: Flow<Boolean> = context.settings.data.map { it[Keys.INSTANT_UPLOAD] ?: false }
+
+    suspend fun setInstantUpload(enabled: Boolean) {
+        context.settings.edit { it[Keys.INSTANT_UPLOAD] = enabled }
+    }
 
     suspend fun setDedupeEnabled(enabled: Boolean) {
         context.settings.edit { it[Keys.DEDUPE] = enabled }
