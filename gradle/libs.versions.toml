@@ -3,6 +3,7 @@ agp = "9.4.0"
 kotlin = "2.4.20"
 ksp = "2.3.12"
 lifecycle = "2.11.0"
+core = "1.17.0"
 activityCompose = "1.13.0"
 composeBom = "2025.12.01"
 coil = "2.7.0"
@@ -16,6 +17,7 @@ ktlint = "14.2.0"
 detekt = "1.23.8"
 
 [libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }

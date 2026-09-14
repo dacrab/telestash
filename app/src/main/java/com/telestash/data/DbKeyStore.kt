@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.core.content.edit
 import java.security.KeyStore
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -43,7 +44,7 @@ object DbKeyStore {
                     .let { r ->
                         ByteArray(TDLIB_KEY_BYTES).also { r.nextBytes(it) }
                     }.also { fresh ->
-                        prefs.edit().putString(PREF_KEY, wrap(fresh)).apply()
+                        prefs.edit { putString(PREF_KEY, wrap(fresh)) }
                     }
             }
         return key

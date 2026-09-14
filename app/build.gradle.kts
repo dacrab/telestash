@@ -35,7 +35,7 @@ android {
     defaultConfig {
         applicationId = "com.telestash"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 37
         versionCode = 3
         versionName = "0.3.0"
     }
@@ -78,6 +78,7 @@ android {
 
 dependencies {
     implementation(files("libs/core-release.aar"))
+    implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))

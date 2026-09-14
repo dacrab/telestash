@@ -11,8 +11,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -55,7 +59,7 @@ import java.util.Locale
 
 private const val MILLIS_PER_SECOND = 1000L
 
-// 16:9 is the dominant aspect of phone camera video.
+// 16:9 is the dominant aspect of phone camera video (grid thumbnails only).
 private const val VIDEO_ASPECT_WIDTH = 16f
 private const val VIDEO_ASPECT_HEIGHT = 9f
 private const val VIDEO_ASPECT_RATIO = VIDEO_ASPECT_WIDTH / VIDEO_ASPECT_HEIGHT
@@ -98,19 +102,17 @@ fun StashImage(
             modifier = imageModifier,
         )
     } else {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-            )
-            CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-        }
+        // Static skeleton while the file resolves; no per-cell spinner noise.
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant))
     }
 }
 
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
-fun VideoPlayer(item: StashItem) {
+fun VideoPlayer(
+    item: StashItem,
+    fill: Boolean = false,
+) {
     val context = LocalContext.current
     val resolved = rememberLocalPath(item)
 
@@ -136,12 +138,18 @@ fun VideoPlayer(item: StashItem) {
                             ViewGroup.LayoutParams.MATCH_PARENT,
                         )
                     useController = true
+                    // FIT shows portrait video correctly instead of forcing 16:9.
+                    resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
                 }
             },
             modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(VIDEO_ASPECT_RATIO),
+                if (fill) {
+                    Modifier.fillMaxSize()
+                } else {
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(VIDEO_ASPECT_RATIO)
+                },
         )
     } else {
         Box(
@@ -166,6 +174,7 @@ fun GalleryCell(
     Box(
         Modifier
             .fillMaxSize()
+            .aspectRatio(1f)
             .padding(1.dp)
             .combinedClickable(
                 onClick = onClick,
@@ -189,8 +198,9 @@ fun GalleryCell(
                 modifier =
                     Modifier
                         .align(Alignment.TopEnd)
-                        .padding(6.dp)
-                        .size(20.dp),
+                        .background(Color.Black.copy(alpha = 0.3f))
+                        .padding(2.dp)
+                        .size(18.dp),
             )
         }
         if (selected) {
@@ -213,18 +223,21 @@ fun GalleryCell(
                 modifier =
                     Modifier
                         .align(Alignment.BottomStart)
-                        .padding(6.dp)
-                        .size(16.dp),
+                        .background(Color.Black.copy(alpha = 0.3f))
+                        .padding(2.dp)
+                        .size(14.dp),
             )
         }
     }
 }
 
-/** Full-screen viewer with zoom and video playback. */
+/** Full-screen viewer: swipe between items, zoom photos, play videos. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PhotoViewerDialog(
-    item: StashItem,
-    onDownload: () -> Unit,
+    items: List<StashItem>,
+    initialIndex: Int,
+    onDownload: (StashItem) -> Unit,
     onDelete: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -232,6 +245,14 @@ fun PhotoViewerDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
+        val pagerState = rememberPagerState(initialPage = initialIndex) { items.size }
+        var current by remember { mutableStateOf(items.getOrElse(initialIndex) { items.first() }) }
+
+        // Track the swiped-to item for the bottom action row.
+        LaunchedEffect(pagerState.currentPage) {
+            items.getOrNull(pagerState.currentPage)?.let { current = it }
+        }
+
         Surface(
             color = Color.Black.copy(alpha = 0.95f),
             modifier = Modifier.fillMaxSize(),
@@ -240,16 +261,25 @@ fun PhotoViewerDialog(
                 Row(
                     Modifier
                         .fillMaxWidth()
+                        .statusBarsPadding()
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        item.fileName,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = Color.White,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                    )
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            current.fileName,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = Color.White,
+                            maxLines = 1,
+                        )
+                        if (items.size > 1) {
+                            Text(
+                                "${pagerState.currentPage + 1} / ${items.size}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.7f),
+                            )
+                        }
+                    }
                     IconButton(onClick = onDismiss) {
                         Icon(
                             Icons.Filled.Close,
@@ -259,32 +289,44 @@ fun PhotoViewerDialog(
                     }
                 }
 
-                Box(
-                    Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                ) {
-                    if (item.isVideo) {
-                        VideoPlayer(item)
-                    } else {
-                        StashImage(item, contentScale = ContentScale.Fit, zoomable = true)
+                HorizontalPager(
+                    state = pagerState,
+                    modifier =
+                        Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                ) { page ->
+                    val item = items[page]
+                    Box(Modifier.fillMaxSize()) {
+                        if (item.isVideo) {
+                            VideoPlayer(item, fill = true)
+                        } else {
+                            StashImage(
+                                item,
+                                contentScale = ContentScale.Fit,
+                                zoomable = true,
+                            )
+                        }
                     }
                 }
 
                 Row(
                     Modifier
                         .fillMaxWidth()
+                        .navigationBarsPadding()
                         .padding(12.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        "${formatDate(item.date)} - ${formatSize(item.sizeBytes)}",
+                        "${formatDate(current.date)} - ${formatSize(current.sizeBytes)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color.White.copy(alpha = 0.8f),
                         modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = onDownload) { Text("Save to device", color = Color.White) }
+                    TextButton(onClick = { onDownload(current) }) {
+                        Text("Save", color = Color.White)
+                    }
                     TextButton(onClick = onDelete) {
                         Text("Delete", color = MaterialTheme.colorScheme.error)
                     }

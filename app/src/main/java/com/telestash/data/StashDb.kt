@@ -50,6 +50,9 @@ interface ItemDao {
     @Query("SELECT COUNT(*) FROM items WHERE deviceUri = :uri")
     suspend fun countByDeviceUri(uri: String): Int
 
+    @Query("SELECT deviceUri FROM items WHERE deviceUri IS NOT NULL")
+    suspend fun allDeviceUris(): List<String>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(items: List<ItemEntity>)
 

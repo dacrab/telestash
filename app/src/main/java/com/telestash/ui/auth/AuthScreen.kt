@@ -6,7 +6,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -20,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -37,6 +40,7 @@ fun AuthScreen(
         modifier =
             Modifier
                 .fillMaxSize()
+                .imePadding()
                 .padding(24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -66,9 +70,13 @@ private fun PhoneStep(
     busy: Boolean,
 ) {
     var phone by remember { mutableStateOf("") }
+    // Allow digits and a leading + only, so Telegram gets a clean number.
+    val cleaned = phone.trim().filterIndexed { i, ch -> ch.isDigit() || (ch == '+' && i == 0) }
     OutlinedTextField(
         value = phone,
-        onValueChange = { phone = it },
+        onValueChange = {
+            phone = it.trim().filterIndexed { i, ch -> ch.isDigit() || (ch == '+' && i == 0) }
+        },
         label = { Text("Phone number") },
         placeholder = { Text("+15551234567") },
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
@@ -77,8 +85,8 @@ private fun PhoneStep(
     )
     Spacer(Modifier.height(16.dp))
     Button(
-        onClick = { vm.submitPhone(phone) },
-        enabled = phone.isNotBlank() && !busy,
+        onClick = { vm.submitPhone(cleaned) },
+        enabled = cleaned.length >= 8 && !busy,
         modifier = Modifier.fillMaxWidth(),
     ) { Text(if (busy) "Sending..." else "Continue") }
 }
@@ -94,9 +102,14 @@ private fun CodeStep(
     Spacer(Modifier.height(8.dp))
     OutlinedTextField(
         value = code,
-        onValueChange = { code = it },
+        onValueChange = { code = it.filter { ch -> ch.isDigit() } },
         label = { Text("Login code") },
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        keyboardOptions =
+            KeyboardOptions(
+                keyboardType = KeyboardType.Number,
+                imeAction = ImeAction.Done,
+            ),
+        keyboardActions = KeyboardActions(onDone = { if (code.isNotBlank()) vm.submitCode(code) }),
         singleLine = true,
         modifier = Modifier.fillMaxWidth(),
     )

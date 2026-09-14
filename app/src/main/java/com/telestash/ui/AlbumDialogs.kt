@@ -24,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import com.telestash.AppViewModel
 import com.telestash.data.AlbumEntity
 
+private const val MAX_ALBUM_NAME = 64
+
 /** Dialog: create a new album (Saved Messages topic). */
 @Composable
 fun NewAlbumDialog(
@@ -37,7 +39,7 @@ fun NewAlbumDialog(
         text = {
             OutlinedTextField(
                 value = name,
-                onValueChange = { name = it },
+                onValueChange = { name = it.take(MAX_ALBUM_NAME) },
                 label = { Text("Album name") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
@@ -68,7 +70,7 @@ fun AddToAlbumDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Add to album") },
+        title = { Text("Move to album") },
         text = {
             Column {
                 if (albums.isEmpty()) {
@@ -92,8 +94,11 @@ fun AddToAlbumDialog(
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = newAlbumName,
-                    onValueChange = { newAlbumName = it },
-                    label = { Text("...or new album name") },
+                    onValueChange = {
+                        newAlbumName = it.take(MAX_ALBUM_NAME)
+                        if (newAlbumName.isNotBlank()) chosenExisting = null
+                    },
+                    label = { Text("New album name") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )

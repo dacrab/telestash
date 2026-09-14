@@ -2,6 +2,7 @@ package com.telestash.util
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import androidx.core.graphics.scale
 import java.io.File
 
 /**
@@ -45,7 +46,7 @@ object PerceptualHash {
             }
         val bmp = BitmapFactory.decodeFile(file.absolutePath, opts) ?: return null
 
-        val scaled = Bitmap.createScaledBitmap(bmp, GRID, GRID, true)
+        val scaled = bmp.scale(GRID, GRID, true)
         if (scaled !== bmp) bmp.recycle()
         val pixels = IntArray(GRID_CELLS)
         scaled.getPixels(pixels, 0, GRID, 0, 0, GRID, GRID)
