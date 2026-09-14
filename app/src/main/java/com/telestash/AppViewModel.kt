@@ -14,6 +14,7 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.telestash.backup.BackupEngine
 import com.telestash.backup.BackupWorker
 import com.telestash.data.AlbumEntity
 import com.telestash.data.ItemEntity
@@ -21,13 +22,13 @@ import com.telestash.data.SettingsRepository
 import com.telestash.data.StashDbHolder
 import com.telestash.device.DeviceMedia
 import com.telestash.device.NewMediaWatcher
-import com.telestash.device.PendingMedia
 import com.telestash.model.StashItem
 import com.telestash.model.messageToEntity
 import com.telestash.model.toEntity
 import com.telestash.model.toStashItem
 import com.telestash.td.TdException
 import com.telestash.td.TgClient
+import com.telestash.util.FileTypes
 import com.telestash.util.PerceptualHash
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -95,6 +96,7 @@ class AppViewModel(
         const val BACKUP_INTERVAL_HOURS = 6L
         const val BACKOFF_SECONDS = 30L
         const val MAX_FAILED_NAMES_IN_TOAST = 3
+        const val ALBUM_CAPTION_PREFIX = "telestash-album:"
         private const val SECONDS_PER_MINUTE = 60
     }
 
@@ -103,6 +105,10 @@ class AppViewModel(
 
     private val _auth = MutableStateFlow<AuthUi>(AuthUi.Loading)
     val auth: StateFlow<AuthUi> = _auth.asStateFlow()
+
+    /** Last auth error, shown inline on the active step; cleared on state change. */
+    private val _authError = MutableStateFlow<String?>(null)
+    val authError: StateFlow<String?> = _authError.asStateFlow()
 
     private val _gallery = MutableStateFlow(GalleryUi())
     val gallery: StateFlow<GalleryUi> = _gallery.asStateFlow()
@@ -179,6 +185,7 @@ class AppViewModel(
             .filterIsInstance<TdApi.UpdateAuthorizationState>()
             .map { it.authorizationState }
             .collect { state ->
+                _authError.value = null
                 when (state) {
                     is TdApi.AuthorizationStateWaitTdlibParameters ->
                         runCatching { c.start() }
@@ -254,7 +261,7 @@ class AppViewModel(
         if (!authBusy.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                runCatching { block(c) }.onFailure { e -> _toasts.tryEmit(userError(e)) }
+                runCatching { block(c) }.onFailure { e -> _authError.value = userError(e) }
             } finally {
                 authBusy.value = false
             }
@@ -303,17 +310,32 @@ class AppViewModel(
         val c = client ?: return
         runCatching {
             val topics = c.loadTopics()
-            dao.upsertAlbums(
-                topics.map { AlbumEntity(topicId = it.id, name = "Album ${it.id}", order = it.order) },
-            )
             for (t in topics) {
                 runCatching {
                     val msgs = c.topicHistory(t.id, 0L, HISTORY_PAGE_SIZE)
                     dao.upsertAll(msgs.messages.mapNotNull { messageToEntity(it, topicId = t.id) })
+                    // Topics carry no name field; the album name lives in the
+                    // first message's "telestash-album:" caption. Never clobber
+                    // a locally known name with a fallback.
+                    if (dao.albumName(t.id) == null) {
+                        dao.upsertAlbums(
+                            listOf(AlbumEntity(t.id, albumNameFrom(msgs.messages), t.order)),
+                        )
+                    }
                 }
             }
         }
     }
+
+    /** "telestash-album:Name" caption of the newest captioned message, or a fallback. */
+    private fun albumNameFrom(messages: Array<TdApi.Message>): String =
+        messages
+            .mapNotNull { m ->
+                (m.content as? TdApi.MessageText)?.text?.text?.takeIf { it.startsWith(ALBUM_CAPTION_PREFIX) }
+            }.firstOrNull()
+            ?.removePrefix(ALBUM_CAPTION_PREFIX)
+            ?.ifBlank { "Album" }
+            ?: "Album"
 
     fun loadMore() {
         val cur = _gallery.value
@@ -449,10 +471,9 @@ class AppViewModel(
         if (_gallery.value.uploadProgress != null) return
         viewModelScope.launch(Dispatchers.IO) {
             val c = client ?: return@launch
-            val daoRef = dao
+            val app = getApplication<Application>()
             val allowed = settings.backupFolders.first()
-            val known = daoRef.allDeviceUris().toSet()
-            val pending = DeviceMedia.pending(getApplication(), known, allowed)
+            val pending = BackupEngine.pending(app, dao, allowed)
             _gallery.value = _gallery.value.copy(newMediaCount = 0)
             if (pending.isEmpty()) return@launch
             uploadMutex.withLock {
@@ -462,77 +483,31 @@ class AppViewModel(
 
                 pending.forEachIndexed { i, item ->
                     _gallery.value = _gallery.value.copy(uploadProgress = i to pending.size)
-                    when (uploadPendingOne(c, daoRef, item, dedupe)) {
-                        UploadOutcome.UPLOADED -> Unit
-                        UploadOutcome.SKIPPED_DUPLICATE -> Unit
-                        UploadOutcome.FAILED -> {
+                    when (BackupEngine.backupOne(app, c, dao, item, dedupe)) {
+                        BackupEngine.Outcome.UPLOADED -> Unit
+                        BackupEngine.Outcome.SKIPPED -> Unit
+                        BackupEngine.Outcome.FAILED -> {
                             failed++
                             failedNames.add(item.displayName)
                         }
                     }
                 }
                 _gallery.value = _gallery.value.copy(uploadProgress = null)
-
-                if (failed > 0) {
-                    val sample = failedNames.take(MAX_FAILED_NAMES_IN_TOAST).joinToString()
-                    val msg =
-                        if (failed == pending.size) {
-                            "Backup failed: $sample"
-                        } else {
-                            "Backed up ${pending.size - failed}, failed $failed: $sample"
-                        }
-                    _toasts.tryEmit(msg)
-                } else {
-                    _toasts.tryEmit("Backed up ${pending.size} new item(s)")
-                }
+                _toasts.tryEmit(uploadSummary(pending.size, failed, failedNames))
             }
         }
     }
 
-    /** Backup one device media item; returns UPLOADED, SKIPPED (dupe) or FAILED. */
-    private suspend fun uploadPendingOne(
-        c: TgClient,
-        dao: com.telestash.data.ItemDao,
-        item: PendingMedia,
-        dedupe: Boolean,
-    ): UploadOutcome {
-        val staged = stageUri(item.uri) ?: return UploadOutcome.FAILED
-        try {
-            var phash = 0L
-            if (dedupe && !item.isVideo) {
-                phash = PerceptualHash.compute(staged) ?: 0L
-                if (phash != 0L && dao.allPhashes().any { PerceptualHash.isProbablyDuplicate(it, phash) }) {
-                    // record without uploading so this uri is never re-scanned
-                    dao.upsertAll(listOf(item.markerEntity()))
-                    return UploadOutcome.SKIPPED_DUPLICATE
-                }
-            }
-            val msg = c.uploadDocument(staged.absolutePath, item.displayName)
-            StashItem.fromMessage(msg)?.let {
-                dao.upsertAll(listOf(it.toEntity(deviceUri = item.uri.toString(), phash = phash)))
-            }
-            return UploadOutcome.UPLOADED
-        } catch (_: Exception) {
-            return UploadOutcome.FAILED
-        } finally {
-            staged.delete()
-        }
+    /** "Backed up N", "…, failed k: names" or "Backup failed: names". */
+    private fun uploadSummary(
+        total: Int,
+        failed: Int,
+        failedNames: List<String>,
+    ): String {
+        if (failed == 0) return "Backed up $total new item(s)"
+        val sample = failedNames.take(MAX_FAILED_NAMES_IN_TOAST).joinToString()
+        return if (failed == total) "Backup failed: $sample" else "Backed up ${total - failed}, failed $failed: $sample"
     }
-
-    /** Synthetic Room row marking a perceptual duplicate as "handled". */
-    private fun PendingMedia.markerEntity() =
-        com.telestash.data.ItemEntity(
-            messageId = -uri.hashCode().toLong(),
-            chatId = 0L,
-            date = 0,
-            fileId = 0,
-            fileName = displayName,
-            sizeBytes = sizeBytes,
-            isVideo = isVideo,
-            localPath = null,
-            deviceUri = uri.toString(),
-            phash = 0L,
-        )
 
     fun upload(
         uris: List<Uri>,
@@ -619,15 +594,7 @@ class AppViewModel(
             .query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
             ?.use { csr -> if (csr.moveToFirst()) csr.getString(0) else null }
 
-    private fun looksLikeVideo(name: String) =
-        when {
-            name.endsWith(".mp4", true) ||
-                name.endsWith(".mov", true) ||
-                name.endsWith(".mkv", true) ||
-                name.endsWith(".avi", true) ||
-                name.endsWith(".webm", true) -> true
-            else -> false
-        }
+    private fun looksLikeVideo(name: String) = FileTypes.isVideoName(name)
 
     // ---------- item actions ----------
 
@@ -691,7 +658,7 @@ class AppViewModel(
         val values =
             ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-                put(MediaStore.MediaColumns.MIME_TYPE, if (isVideo) "video/mp4" else guessMime(displayName))
+                put(MediaStore.MediaColumns.MIME_TYPE, if (isVideo) "video/mp4" else FileTypes.imageMime(displayName))
             }
         val uri =
             app.contentResolver.insert(collection, values)
@@ -700,15 +667,6 @@ class AppViewModel(
             src.inputStream().use { it.copyTo(out) }
         } ?: error("Could not open output stream")
     }
-
-    private fun guessMime(name: String) =
-        when {
-            name.endsWith(".png", true) -> "image/png"
-            name.endsWith(".webp", true) -> "image/webp"
-            name.endsWith(".heic", true) || name.endsWith(".heif", true) -> "image/heic"
-            name.endsWith(".gif", true) -> "image/gif"
-            else -> "image/jpeg"
-        }
 
     // ---------- settings / backup ----------
 

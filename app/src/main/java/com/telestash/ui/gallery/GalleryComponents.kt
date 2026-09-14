@@ -4,7 +4,6 @@ import android.view.ViewGroup
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,9 +17,11 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -28,7 +29,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -50,14 +50,10 @@ import androidx.media3.exoplayer.ExoPlayer
 import coil.compose.AsyncImage
 import com.telestash.model.StashItem
 import com.telestash.td.TgClient
+import com.telestash.util.Format
 import net.engawapg.lib.zoomable.rememberZoomState
 import net.engawapg.lib.zoomable.zoomable
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-
-private const val MILLIS_PER_SECOND = 1000L
 
 // 16:9 is the dominant aspect of phone camera video (grid thumbnails only).
 private const val VIDEO_ASPECT_WIDTH = 16f
@@ -248,7 +244,10 @@ fun PhotoViewerDialog(
         val pagerState = rememberPagerState(initialPage = initialIndex) { items.size }
         var current by remember { mutableStateOf(items.getOrElse(initialIndex) { items.first() }) }
 
-        // Track the swiped-to item for the bottom action row.
+        // System back dismisses the viewer (and stops video playback).
+        androidx.activity.compose.BackHandler(onBack = onDismiss)
+
+        // Track the swiped-to item for the action row.
         LaunchedEffect(pagerState.currentPage) {
             items.getOrNull(pagerState.currentPage)?.let { current = it }
         }
@@ -265,9 +264,16 @@ fun PhotoViewerDialog(
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Close",
+                            tint = Color.White,
+                        )
+                    }
                     Column(Modifier.weight(1f)) {
                         Text(
-                            current.fileName,
+                            Format.date(current.date),
                             style = MaterialTheme.typography.titleSmall,
                             color = Color.White,
                             maxLines = 1,
@@ -280,11 +286,18 @@ fun PhotoViewerDialog(
                             )
                         }
                     }
-                    IconButton(onClick = onDismiss) {
+                    IconButton(onClick = { onDownload(current) }) {
                         Icon(
-                            Icons.Filled.Close,
-                            contentDescription = "Close",
+                            Icons.Filled.Download,
+                            contentDescription = "Save to device",
                             tint = Color.White,
+                        )
+                    }
+                    IconButton(onClick = onDelete) {
+                        Icon(
+                            Icons.Filled.Delete,
+                            contentDescription = "Delete",
+                            tint = MaterialTheme.colorScheme.error,
                         )
                     }
                 }
@@ -314,38 +327,18 @@ fun PhotoViewerDialog(
                     Modifier
                         .fillMaxWidth()
                         .navigationBarsPadding()
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        "${formatDate(current.date)} - ${formatSize(current.sizeBytes)}",
+                        "${current.fileName} · ${Format.size(current.sizeBytes)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color.White.copy(alpha = 0.8f),
+                        maxLines = 1,
                         modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = { onDownload(current) }) {
-                        Text("Save", color = Color.White)
-                    }
-                    TextButton(onClick = onDelete) {
-                        Text("Delete", color = MaterialTheme.colorScheme.error)
-                    }
                 }
             }
         }
     }
-}
-
-private fun formatDate(epochSec: Int): String =
-    SimpleDateFormat("MMM d, yyyy HH:mm", Locale.getDefault()).format(Date(epochSec * MILLIS_PER_SECOND))
-
-private const val BYTES_PER_KB = 1024L
-
-private fun formatSize(bytes: Long): String {
-    if (bytes < BYTES_PER_KB) return "$bytes B"
-    val kb = bytes / BYTES_PER_KB.toDouble()
-    if (kb < BYTES_PER_KB) return "%.1f KB".format(kb)
-    val mb = kb / BYTES_PER_KB.toDouble()
-    if (mb < BYTES_PER_KB) return "%.1f MB".format(mb)
-    return "%.1f GB".format(mb / BYTES_PER_KB.toDouble())
 }
