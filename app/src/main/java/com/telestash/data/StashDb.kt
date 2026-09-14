@@ -50,6 +50,9 @@ interface ItemDao {
     @Query("SELECT COUNT(*) FROM items WHERE deviceUri = :uri")
     suspend fun countByDeviceUri(uri: String): Int
 
+    @Query("SELECT name FROM albums WHERE topicId = :topicId")
+    suspend fun albumName(topicId: Long): String?
+
     @Query("SELECT deviceUri FROM items WHERE deviceUri IS NOT NULL")
     suspend fun allDeviceUris(): List<String>
 

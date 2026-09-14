@@ -30,12 +30,16 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.AppViewModel
 import com.telestash.AuthUi
 
+private const val MIN_PHONE_DIGITS = 8
+
+/** Auth steps with per-step content; errors show inline under the fields. */
 @Composable
 fun AuthScreen(
     vm: AppViewModel,
     state: AuthUi,
 ) {
     val busy by vm.authBusyPublic.collectAsStateWithLifecycle()
+    val error by vm.authError.collectAsStateWithLifecycle()
     Column(
         modifier =
             Modifier
@@ -55,12 +59,25 @@ fun AuthScreen(
         Spacer(Modifier.height(32.dp))
 
         when (state) {
-            is AuthUi.Phone -> PhoneStep(vm, busy)
-            is AuthUi.Code -> CodeStep(vm, busy, state.hint)
-            is AuthUi.Password -> PasswordStep(vm, busy, state.hint)
-            is AuthUi.Registration -> RegistrationStep(vm, busy)
+            is AuthUi.Phone -> PhoneStep(vm, busy, error)
+            is AuthUi.Code -> CodeStep(vm, busy, state.hint, error)
+            is AuthUi.Password -> PasswordStep(vm, busy, state.hint, error)
+            is AuthUi.Registration -> RegistrationStep(vm, busy, error)
             else -> CircularProgressIndicator()
         }
+    }
+}
+
+/** Inline error text under the active step's fields, if any. */
+@Composable
+private fun ErrorText(error: String?) {
+    if (error != null) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            error,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
     }
 }
 
@@ -68,6 +85,7 @@ fun AuthScreen(
 private fun PhoneStep(
     vm: AppViewModel,
     busy: Boolean,
+    error: String?,
 ) {
     var phone by remember { mutableStateOf("") }
     // Allow digits and a leading + only, so Telegram gets a clean number.
@@ -79,14 +97,26 @@ private fun PhoneStep(
         },
         label = { Text("Phone number") },
         placeholder = { Text("+15551234567") },
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+        keyboardOptions =
+            KeyboardOptions(
+                keyboardType = KeyboardType.Phone,
+                imeAction = ImeAction.Done,
+            ),
+        keyboardActions =
+            KeyboardActions(
+                onDone = {
+                    if (cleaned.length >= MIN_PHONE_DIGITS && !busy) vm.submitPhone(cleaned)
+                },
+            ),
         singleLine = true,
+        enabled = !busy,
         modifier = Modifier.fillMaxWidth(),
     )
+    ErrorText(error)
     Spacer(Modifier.height(16.dp))
     Button(
         onClick = { vm.submitPhone(cleaned) },
-        enabled = cleaned.length >= 8 && !busy,
+        enabled = cleaned.length >= MIN_PHONE_DIGITS && !busy,
         modifier = Modifier.fillMaxWidth(),
     ) { Text(if (busy) "Sending..." else "Continue") }
 }
@@ -96,27 +126,36 @@ private fun CodeStep(
     vm: AppViewModel,
     busy: Boolean,
     hint: String,
+    error: String?,
 ) {
     var code by remember { mutableStateOf("") }
+    val digits = code.filter { ch -> ch.isDigit() }
     Text(hint, style = MaterialTheme.typography.bodyMedium)
     Spacer(Modifier.height(8.dp))
     OutlinedTextField(
         value = code,
-        onValueChange = { code = it.filter { ch -> ch.isDigit() } },
+        onValueChange = {
+            code = it.filter { ch -> ch.isDigit() }
+            // Auto-submit when a 5+ digit code is fully pasted/typed.
+            val d = code.filter { ch -> ch.isDigit() }
+            if (!busy && d.length >= 5) vm.submitCode(d)
+        },
         label = { Text("Login code") },
         keyboardOptions =
             KeyboardOptions(
                 keyboardType = KeyboardType.Number,
                 imeAction = ImeAction.Done,
             ),
-        keyboardActions = KeyboardActions(onDone = { if (code.isNotBlank()) vm.submitCode(code) }),
+        keyboardActions = KeyboardActions(onDone = { if (digits.isNotBlank() && !busy) vm.submitCode(digits) }),
         singleLine = true,
+        enabled = !busy,
         modifier = Modifier.fillMaxWidth(),
     )
+    ErrorText(error)
     Spacer(Modifier.height(16.dp))
     Button(
-        onClick = { vm.submitCode(code) },
-        enabled = code.isNotBlank() && !busy,
+        onClick = { vm.submitCode(digits) },
+        enabled = digits.isNotBlank() && !busy,
         modifier = Modifier.fillMaxWidth(),
     ) { Text(if (busy) "Checking..." else "Verify") }
 }
@@ -126,6 +165,7 @@ private fun PasswordStep(
     vm: AppViewModel,
     busy: Boolean,
     hint: String,
+    error: String?,
 ) {
     var pw by remember { mutableStateOf("") }
     if (hint.isNotBlank()) Text("Hint: $hint", style = MaterialTheme.typography.bodyMedium)
@@ -135,22 +175,30 @@ private fun PasswordStep(
         onValueChange = { pw = it },
         label = { Text("Cloud password") },
         visualTransformation = PasswordVisualTransformation(),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        keyboardOptions =
+            KeyboardOptions(
+                keyboardType = KeyboardType.Password,
+                imeAction = ImeAction.Done,
+            ),
+        keyboardActions = KeyboardActions(onDone = { if (pw.isNotBlank() && !busy) vm.submitPassword(pw) }),
         singleLine = true,
+        enabled = !busy,
         modifier = Modifier.fillMaxWidth(),
     )
+    ErrorText(error)
     Spacer(Modifier.height(16.dp))
     Button(
         onClick = { vm.submitPassword(pw) },
         enabled = pw.isNotBlank() && !busy,
         modifier = Modifier.fillMaxWidth(),
-    ) { Text("Unlock") }
+    ) { Text(if (busy) "Unlocking..." else "Unlock") }
 }
 
 @Composable
 private fun RegistrationStep(
     vm: AppViewModel,
     busy: Boolean,
+    error: String?,
 ) {
     var name by remember { mutableStateOf("") }
     OutlinedTextField(
@@ -158,8 +206,10 @@ private fun RegistrationStep(
         onValueChange = { name = it },
         label = { Text("Your name") },
         singleLine = true,
+        enabled = !busy,
         modifier = Modifier.fillMaxWidth(),
     )
+    ErrorText(error)
     Spacer(Modifier.height(16.dp))
     Button(
         onClick = { vm.submitRegistration(name) },

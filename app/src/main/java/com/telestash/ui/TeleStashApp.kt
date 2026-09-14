@@ -4,13 +4,21 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -58,6 +66,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -69,11 +79,13 @@ import com.telestash.model.StashItem
 import com.telestash.ui.auth.AuthScreen
 import com.telestash.ui.gallery.GalleryCell
 import com.telestash.ui.gallery.PhotoViewerDialog
+import com.telestash.util.Format
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 
-private const val MILLIS_PER_SECOND = 1000L
+/** How many placeholder cells to show during first sync. */
+private const val SKELETON_CELLS = 24
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -387,6 +399,12 @@ private fun GalleryScreen(
         EndlessScrollTrigger(gridState, gallery.items.size) { vm.loadMore() }
     }
 
+    // First sync: skeleton grid so the app doesn't look empty-dead.
+    if (gallery.items.isEmpty() && gallery.albums.isEmpty() && gallery.syncing) {
+        SkeletonGrid(padding)
+        return
+    }
+
     if (gallery.items.isEmpty() && gallery.albums.isEmpty() && !gallery.syncing) {
         EmptyGallery(padding)
         return
@@ -402,29 +420,20 @@ private fun GalleryScreen(
                 AlbumsStrip(gallery.albums, onOpen = onOpenAlbum)
             }
             if (gallery.newMediaCount > 0 && !selecting) {
-                NewMediaBanner(
-                    count = gallery.newMediaCount,
-                    onUpload = { vm.uploadPending() },
-                    onDismiss = { vm.dismissNewMedia() },
-                )
-            }
-            gallery.uploadProgress?.let { (done, total) ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "Uploading $done/$total",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.weight(1f),
-                    )
-                    CircularProgressIndicator(
-                        Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
+                AnimatedVisibility(visible = true, enter = expandVertically(), exit = shrinkVertically()) {
+                    NewMediaBanner(
+                        count = gallery.newMediaCount,
+                        onUpload = { vm.uploadPending() },
+                        onDismiss = { vm.dismissNewMedia() },
                     )
                 }
+            }
+            AnimatedVisibility(
+                visible = gallery.uploadProgress != null,
+                enter = expandVertically(),
+                exit = shrinkVertically(),
+            ) {
+                UploadProgressRow(gallery.uploadProgress)
             }
             if (gallery.syncing) LinearProgressIndicator(Modifier.fillMaxWidth())
 
@@ -437,6 +446,51 @@ private fun GalleryScreen(
                 onItemClick = onItemClick,
             )
         }
+    }
+}
+
+/** Placeholder grid shown during the very first cloud sync. */
+@Composable
+private fun SkeletonGrid(padding: PaddingValues) {
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(minSize = 110.dp),
+        contentPadding = PaddingValues(2.dp),
+        modifier =
+            Modifier
+                .fillMaxSize()
+                .padding(padding),
+    ) {
+        items(SKELETON_CELLS) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .aspectRatio(1f)
+                    .padding(1.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+            )
+        }
+    }
+}
+
+/** Slim "Uploading 4/12" row with a spinner. */
+@Composable
+private fun UploadProgressRow(progress: Pair<Int, Int>?) {
+    if (progress == null) return
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "Uploading ${progress.first + 1}/${progress.second}",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f),
+        )
+        CircularProgressIndicator(
+            Modifier.size(16.dp),
+            strokeWidth = 2.dp,
+        )
     }
 }
 
@@ -534,6 +588,7 @@ private fun MediaGrid(
     onEnterSelection: (Long) -> Unit,
     onItemClick: (StashItem) -> Unit,
 ) {
+    val haptic = LocalHapticFeedback.current
     LazyVerticalGrid(
         columns = GridCells.Adaptive(minSize = 110.dp),
         state = gridState,
@@ -543,22 +598,42 @@ private fun MediaGrid(
     ) {
         val grouped = groupByMonth(gallery.items)
         grouped.forEach { (monthLabel, monthItems) ->
-            item(key = "header_$monthLabel") {
+            stickyHeader(key = "header_$monthLabel") {
                 Text(
                     monthLabel,
                     style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surface)
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
                 )
             }
             items(monthItems, key = { it.messageId }) { item ->
-                GalleryCell(
-                    item = item,
-                    selected = gallery.selected?.contains(item.messageId) == true,
-                    onClick = {
-                        if (selecting) onToggleSelect(item.messageId) else onItemClick(item)
-                    },
-                    onLongClick = { onEnterSelection(item.messageId) },
-                )
+                val selected = gallery.selected?.contains(item.messageId) == true
+                // Fade+shrink new cells in so syncs feel smooth, not jumpy.
+                AnimatedVisibility(
+                    visibleState = remember { MutableTransitionState(false).apply { targetState = true } },
+                    enter = fadeIn() + scaleIn(initialScale = 0.85f),
+                ) {
+                    GalleryCell(
+                        item = item,
+                        selected = selected,
+                        onClick = {
+                            if (selecting) {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onToggleSelect(item.messageId)
+                            } else {
+                                onItemClick(item)
+                            }
+                        },
+                        onLongClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onEnterSelection(item.messageId)
+                        },
+                    )
+                }
             }
         }
         if (gallery.loadingMore) {
@@ -580,7 +655,7 @@ private fun groupByMonth(items: List<StashItem>): List<Pair<String, List<StashIt
     val cal = Calendar.getInstance()
     return items
         .groupBy { item ->
-            cal.timeInMillis = item.date * MILLIS_PER_SECOND
+            cal.timeInMillis = item.date * Format.EPOCH_MILLIS_PER_SECOND
             fmt.format(cal.time)
         }.map { (k, v) -> k to v }
 }
