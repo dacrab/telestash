@@ -3,7 +3,6 @@ package com.telestash.backup
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
-import com.telestash.backup.BackupEngine.Outcome
 import com.telestash.data.SettingsRepository
 import com.telestash.data.StashDbHolder
 import com.telestash.td.TdException
@@ -22,6 +21,7 @@ class BackupWorker(
 ) : CoroutineWorker(ctx, params) {
     companion object {
         const val PERIODIC = "telestash-backup"
+        const val ONE_SHOT = "telestash-backup-now"
     }
 
     override suspend fun doWork(): Result =
@@ -33,24 +33,22 @@ class BackupWorker(
             val settings = SettingsRepository(applicationContext)
             val candidates =
                 BackupEngine.pending(applicationContext, dao, settings.backupFolders.first())
-            val dedupe = settings.dedupeEnabled.first()
+            if (candidates.isEmpty()) return@withContext Result.success()
 
-            var uploaded = 0
-            var failures = 0
-            for (cand in candidates) {
-                if (isStopped) return@withContext Result.retry()
-                if (dao.countByDeviceUri(cand.uri.toString()) > 0) continue
+            val summary =
                 try {
-                    when (BackupEngine.backupOne(applicationContext, client, dao, cand, dedupe)) {
-                        Outcome.UPLOADED -> uploaded++
-                        Outcome.SKIPPED -> Unit
-                        Outcome.FAILED -> failures++
-                    }
+                    BackupEngine.backupAll(
+                        applicationContext,
+                        client,
+                        dao,
+                        candidates,
+                        settings.dedupeEnabled.first(),
+                    )
                 } catch (e: TdException) {
-                    if (e.isFloodWait) return@withContext Result.retry()
-                    failures++
+                    // FLOOD_WAIT etc: retry the batch later from where it left off
+                    // (uploaded items are already recorded in Room).
+                    if (e.isFloodWait) return@withContext Result.retry() else throw e
                 }
-            }
-            if (failures > 0 && uploaded == 0) Result.retry() else Result.success()
+            if (summary.allFailed) Result.retry() else Result.success()
         }
 }

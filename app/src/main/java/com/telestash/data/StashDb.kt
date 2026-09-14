@@ -3,11 +3,10 @@ package com.telestash.data
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
+import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
 /** A media item mirrored from Saved Messages into local Room cache. */
@@ -56,10 +55,10 @@ interface ItemDao {
     @Query("SELECT deviceUri FROM items WHERE deviceUri IS NOT NULL")
     suspend fun allDeviceUris(): List<String>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertAll(items: List<ItemEntity>)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertAlbums(albums: List<AlbumEntity>)
 
     @Query("SELECT * FROM albums ORDER BY `order` DESC")

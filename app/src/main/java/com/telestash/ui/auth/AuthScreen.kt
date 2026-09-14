@@ -31,6 +31,7 @@ import com.telestash.AppViewModel
 import com.telestash.AuthUi
 
 private const val MIN_PHONE_DIGITS = 8
+private const val AUTO_SUBMIT_MIN_DIGITS = 6
 
 /** Auth steps with per-step content; errors show inline under the fields. */
 @Composable
@@ -134,11 +135,14 @@ private fun CodeStep(
     Spacer(Modifier.height(8.dp))
     OutlinedTextField(
         value = code,
-        onValueChange = {
-            code = it.filter { ch -> ch.isDigit() }
-            // Auto-submit when a 5+ digit code is fully pasted/typed.
+        onValueChange = { new ->
+            code = new.filter { ch -> ch.isDigit() }
+            // Auto-submit only when a full code lands at once (paste),
+            // not while the user is still typing shorter codes.
             val d = code.filter { ch -> ch.isDigit() }
-            if (!busy && d.length >= 5) vm.submitCode(d)
+            if (!busy && new.length >= AUTO_SUBMIT_MIN_DIGITS && d.length >= AUTO_SUBMIT_MIN_DIGITS) {
+                vm.submitCode(d)
+            }
         },
         label = { Text("Login code") },
         keyboardOptions =
