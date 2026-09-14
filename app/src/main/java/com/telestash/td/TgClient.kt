@@ -18,6 +18,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 import java.io.File
+import java.util.concurrent.atomic.AtomicLong
 
 class TdException(
     val code: Int,
@@ -45,7 +46,8 @@ class TgClient private constructor(
 ) {
     companion object {
         private const val APP_VERSION = "0.3.0"
-        private const val TOPICS_COLLECTION_TIMEOUT_MS = 1_000L
+        private const val TOPICS_COLLECTION_TIMEOUT_MS = 3_000L
+        private const val TOPICS_QUIET_PERIOD_MS = 250L
         private const val TOPICS_PAGE_LIMIT = 100
         private const val DOWNLOAD_PRIORITY = 16
         private const val LOG_MAX_SIZE_BYTES = 1L shl 22
@@ -216,14 +218,24 @@ class TgClient private constructor(
     suspend fun loadTopics(): List<TdApi.SavedMessagesTopic> {
         val collected = mutableListOf<TdApi.SavedMessagesTopic>()
         coroutineScopeRun { collector ->
+            val lastArrival = AtomicLong(System.currentTimeMillis())
             collector.launch {
                 updates
                     .filterIsInstance<TdApi.UpdateSavedMessagesTopic>()
-                    .collect { u -> collected.add(u.topic) }
+                    .collect { u ->
+                        collected.add(u.topic)
+                        // "now" restarts the quiet-period clock below.
+                        lastArrival.set(System.currentTimeMillis())
+                    }
             }
-            // 404 means "all loaded" -> expected terminal state
             runCatching { send(TdApi.LoadSavedMessagesTopics(TOPICS_PAGE_LIMIT)) }
-            withTimeoutOrNull(TOPICS_COLLECTION_TIMEOUT_MS) { delay(Long.MAX_VALUE) }
+            // Wait until topic updates stop arriving for a short quiet period
+            // (or the overall timeout hits), instead of a fixed one-second wait.
+            withTimeoutOrNull(TOPICS_COLLECTION_TIMEOUT_MS) {
+                while (System.currentTimeMillis() - lastArrival.get() < TOPICS_QUIET_PERIOD_MS) {
+                    delay(TOPICS_QUIET_PERIOD_MS)
+                }
+            }
         }
         return collected.distinctBy { it.id }
     }

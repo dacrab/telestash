@@ -22,6 +22,7 @@ import com.telestash.data.SettingsRepository
 import com.telestash.data.StashDbHolder
 import com.telestash.device.DeviceMedia
 import com.telestash.device.NewMediaWatcher
+import com.telestash.device.PendingMedia
 import com.telestash.model.StashItem
 import com.telestash.model.messageToEntity
 import com.telestash.model.toEntity
@@ -37,6 +38,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
@@ -74,8 +76,6 @@ data class GalleryUi(
     val albums: List<AlbumEntity> = emptyList(),
     val loadingMore: Boolean = false,
     val syncing: Boolean = false,
-    /** Upload progress: done count out of total, null = not uploading. */
-    val uploadProgress: Pair<Int, Int>? = null,
     /** Non-null = multi-select mode active with these message ids. */
     val selected: Set<Long>? = null,
     /** 0 = main gallery; otherwise the open album topic id. */
@@ -113,20 +113,16 @@ class AppViewModel(
     private val _gallery = MutableStateFlow(GalleryUi())
     val gallery: StateFlow<GalleryUi> = _gallery.asStateFlow()
 
+    /** Upload progress (done, total); separate flow so the grid never recomposes per item. */
+    private val _uploadProgress = MutableStateFlow<Pair<Int, Int>?>(null)
+    val uploadProgress: StateFlow<Pair<Int, Int>?> = _uploadProgress.asStateFlow()
+
     private val _toasts = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val toasts: SharedFlow<String> = _toasts.asSharedFlow()
 
     private var client: TgClient? = null
     private var oldestLoaded = Long.MAX_VALUE
     private var started = false
-    private val newMediaWatcher =
-        NewMediaWatcher(getApplication(), viewModelScope) { count, autoUpload ->
-            if (autoUpload) {
-                uploadPending()
-            } else {
-                _gallery.value = _gallery.value.copy(newMediaCount = count)
-            }
-        }
 
     val autoBackup = settings.autoBackup
     val wifiOnly = settings.wifiOnly
@@ -134,6 +130,16 @@ class AppViewModel(
     val backupFolders = settings.backupFolders
     val dedupeEnabled = settings.dedupeEnabled
     val instantUpload = settings.instantUpload
+
+    /** Watches MediaStore and either auto-uploads or banners new device media. */
+    private val newMediaWatcher =
+        NewMediaWatcher(getApplication(), viewModelScope) { pending, autoUpload ->
+            if (autoUpload) {
+                uploadPendingItems(pending)
+            } else {
+                _gallery.value = _gallery.value.copy(newMediaCount = pending.size)
+            }
+        }
 
     /** Start (or restart after credentials change) the TDLib client + collectors. */
     fun start() {
@@ -160,13 +166,16 @@ class AppViewModel(
         }
     }
 
-    /** Room -> UI. flatMapLatest so switching albums re-subscribes correctly. */
+    /** Room -> UI. flatMapLatest keyed on topic only, so selection/state changes
+     * don't re-run the underlying query. */
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private fun observeGallery() {
         viewModelScope.launch {
             _gallery
-                .flatMapLatest { g ->
-                    if (g.openTopicId == 0L) dao.observeMainItems() else dao.observeTopic(g.openTopicId)
+                .map { it.openTopicId }
+                .distinctUntilChanged()
+                .flatMapLatest { topicId ->
+                    if (topicId == 0L) dao.observeMainItems() else dao.observeTopic(topicId)
                 }.collect { entities ->
                     _gallery.value = _gallery.value.copy(items = entities.map { it.toStashItem() })
                     val min = entities.minOfOrNull { it.messageId } ?: Long.MAX_VALUE
@@ -464,36 +473,46 @@ class AppViewModel(
     }
 
     /**
-     * Upload every not-yet-backed-up device media item (used by the new-media
-     * banner, instant upload, and the backup worker when the app is running).
+     * Scan for not-yet-backed-up device media and upload it (new-media banner,
+     * instant upload, settings toggle).
      */
     fun uploadPending() {
-        if (_gallery.value.uploadProgress != null) return
+        if (_uploadProgress.value != null) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            val pending =
+                BackupEngine.pending(app, dao, settings.backupFolders.first())
+            _gallery.value = _gallery.value.copy(newMediaCount = 0)
+            uploadPendingItems(pending)
+        }
+    }
+
+    /** Upload an already-scanned pending list (from the new-media watcher). */
+    fun uploadPendingItems(pending: List<PendingMedia>) {
+        if (_uploadProgress.value != null || pending.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
             val c = client ?: return@launch
-            val app = getApplication<Application>()
-            val allowed = settings.backupFolders.first()
-            val pending = BackupEngine.pending(app, dao, allowed)
-            _gallery.value = _gallery.value.copy(newMediaCount = 0)
-            if (pending.isEmpty()) return@launch
             uploadMutex.withLock {
-                val dedupe = settings.dedupeEnabled.first()
-                var failed = 0
-                val failedNames = mutableListOf<String>()
-
-                pending.forEachIndexed { i, item ->
-                    _gallery.value = _gallery.value.copy(uploadProgress = i to pending.size)
-                    when (BackupEngine.backupOne(app, c, dao, item, dedupe)) {
-                        BackupEngine.Outcome.UPLOADED -> Unit
-                        BackupEngine.Outcome.SKIPPED -> Unit
-                        BackupEngine.Outcome.FAILED -> {
-                            failed++
-                            failedNames.add(item.displayName)
+                val app = getApplication<Application>()
+                val summary =
+                    runCatching {
+                        BackupEngine.backupAll(
+                            app,
+                            c,
+                            dao,
+                            pending,
+                            settings.dedupeEnabled.first(),
+                        ) { done, total -> _uploadProgress.value = done to total }
+                    }.getOrElse { e ->
+                        if (e is TdException && e.isFloodWait) {
+                            _toasts.tryEmit(
+                                "Backup paused: Telegram asks to wait ${e.floodWaitSeconds}s",
+                            )
                         }
+                        BackupEngine.Summary(0, 0, emptyList())
                     }
-                }
-                _gallery.value = _gallery.value.copy(uploadProgress = null)
-                _toasts.tryEmit(uploadSummary(pending.size, failed, failedNames))
+                _uploadProgress.value = null
+                _toasts.tryEmit(uploadSummary(pending.size, summary))
             }
         }
     }
@@ -501,13 +520,15 @@ class AppViewModel(
     /** "Backed up N", "…, failed k: names" or "Backup failed: names". */
     private fun uploadSummary(
         total: Int,
-        failed: Int,
-        failedNames: List<String>,
-    ): String {
-        if (failed == 0) return "Backed up $total new item(s)"
-        val sample = failedNames.take(MAX_FAILED_NAMES_IN_TOAST).joinToString()
-        return if (failed == total) "Backup failed: $sample" else "Backed up ${total - failed}, failed $failed: $sample"
-    }
+        s: BackupEngine.Summary,
+    ): String =
+        when {
+            s.failed == 0 -> "Backed up $total new item(s)"
+            s.uploaded > 0 ->
+                "Backed up ${s.uploaded}, failed ${s.failed}: " +
+                    s.failedNames.take(MAX_FAILED_NAMES_IN_TOAST).joinToString()
+            else -> "Backup failed: " + s.failedNames.take(MAX_FAILED_NAMES_IN_TOAST).joinToString()
+        }
 
     fun upload(
         uris: List<Uri>,
@@ -520,13 +541,13 @@ class AppViewModel(
             val failedNames = mutableListOf<String>()
 
             uris.forEachIndexed { i, uri ->
-                _gallery.value = _gallery.value.copy(uploadProgress = i to uris.size)
+                _uploadProgress.value = i to uris.size
                 if (uploadOne(c, uri, topicId, dedupe) == UploadOutcome.FAILED) {
                     failed++
                     failedNames.add(queryDisplayName(getApplication(), uri) ?: "file ${i + 1}")
                 }
             }
-            _gallery.value = _gallery.value.copy(uploadProgress = null)
+            _uploadProgress.value = null
 
             val ok = uris.size - failed
             val failedSample = failedNames.take(MAX_FAILED_NAMES_IN_TOAST).joinToString()
@@ -549,7 +570,7 @@ class AppViewModel(
         val staged = stageUri(uri) ?: return UploadOutcome.FAILED
         try {
             val phash =
-                if (dedupe && !looksLikeVideo(staged.name)) {
+                if (dedupe && !FileTypes.isVideoName(staged.name)) {
                     PerceptualHash.compute(staged) ?: 0L
                 } else {
                     0L
@@ -593,8 +614,6 @@ class AppViewModel(
         resolver
             .query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
             ?.use { csr -> if (csr.moveToFirst()) csr.getString(0) else null }
-
-    private fun looksLikeVideo(name: String) = FileTypes.isVideoName(name)
 
     // ---------- item actions ----------
 
@@ -732,7 +751,7 @@ class AppViewModel(
     fun backupNow() {
         _toasts.tryEmit("Backing up now...")
         WorkManager.getInstance(getApplication()).enqueueUniqueWork(
-            "telestash-backup-now",
+            BackupWorker.ONE_SHOT,
             ExistingWorkPolicy.REPLACE,
             OneTimeWorkRequestBuilder<BackupWorker>().build(),
         )

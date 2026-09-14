@@ -105,10 +105,7 @@ fun StashImage(
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
-fun VideoPlayer(
-    item: StashItem,
-    fill: Boolean = false,
-) {
+fun VideoPlayer(item: StashItem) {
     val context = LocalContext.current
     val resolved = rememberLocalPath(item)
 
@@ -138,14 +135,7 @@ fun VideoPlayer(
                     resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
                 }
             },
-            modifier =
-                if (fill) {
-                    Modifier.fillMaxSize()
-                } else {
-                    Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(VIDEO_ASPECT_RATIO)
-                },
+            modifier = Modifier.fillMaxSize(),
         )
     } else {
         Box(
@@ -312,7 +302,7 @@ fun PhotoViewerDialog(
                     val item = items[page]
                     Box(Modifier.fillMaxSize()) {
                         if (item.isVideo) {
-                            VideoPlayer(item, fill = true)
+                            VideoPlayer(item)
                         } else {
                             StashImage(
                                 item,

@@ -94,6 +94,7 @@ fun TeleStashApp(
     authState: androidx.compose.runtime.State<AuthUi>,
 ) {
     val gallery by vm.gallery.collectAsStateWithLifecycle()
+    val uploadProgress by vm.uploadProgress.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var viewer by remember { mutableStateOf<StashItem?>(null) }
     var showSettings by remember { mutableStateOf(false) }
@@ -163,6 +164,7 @@ fun TeleStashApp(
                 GalleryScreen(
                     vm,
                     gallery,
+                    uploadProgress,
                     openTopicId,
                     padding,
                     onItemClick = { viewer = it },
@@ -187,8 +189,9 @@ fun TeleStashApp(
         albums = gallery.albums,
         confirmDelete = confirmDelete,
         onDeleteConfirmed = {
-            if (viewer != null) {
-                vm.delete(viewer!!)
+            val v = viewer
+            if (v != null) {
+                vm.delete(v)
                 viewer = null
             } else {
                 vm.deleteSelected()
@@ -386,6 +389,7 @@ private fun SelectionTopBar(
 private fun GalleryScreen(
     vm: AppViewModel,
     gallery: GalleryUi,
+    uploadProgress: Pair<Int, Int>?,
     openTopicId: Long,
     padding: PaddingValues,
     onItemClick: (StashItem) -> Unit,
@@ -429,11 +433,11 @@ private fun GalleryScreen(
                 }
             }
             AnimatedVisibility(
-                visible = gallery.uploadProgress != null,
+                visible = uploadProgress != null,
                 enter = expandVertically(),
                 exit = shrinkVertically(),
             ) {
-                UploadProgressRow(gallery.uploadProgress)
+                UploadProgressRow(uploadProgress)
             }
             if (gallery.syncing) LinearProgressIndicator(Modifier.fillMaxWidth())
 
