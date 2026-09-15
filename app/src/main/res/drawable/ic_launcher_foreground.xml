@@ -4,14 +4,62 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- cloud shape -->
-    <group>
-        <path
-            android:fillColor="#FFFFFF"
-            android:pathData="M38,64 C30,64 24,58 24,50 C24,42 30,36 38,36 C40,28 47,22 56,22 C66,22 74,29 75,38 C83,38 90,45 90,54 C90,60 85,64 79,64 Z" />
-        <!-- arrow up (stash) -->
-        <path
-            android:fillColor="#2AABEE"
-            android:pathData="M58,32 L66,42 L61,42 L61,56 L55,56 L55,42 L50,42 Z" />
+
+    <!--
+      TeleStash mark: a photo card being "stashed" into a cloud.
+      Built symmetric around x=54; the fit group scales the composition and
+      re-centers it at (54,54) so it stays inside the 66dp adaptive-icon
+      safe circle on any launcher mask.
+    -->
+
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.8"
+        android:scaleY="0.8"
+        android:translateX="-3.25"
+        android:translateY="2.5">
+
+        <!-- Photo card: tilted ~8deg, half-tucked behind the cloud. -->
+        <group
+            android:pivotX="54"
+            android:pivotY="54"
+            android:rotation="8"
+            android:translateX="-6"
+            android:translateY="6">
+            <!-- card drop shadow -->
+            <path
+                android:fillAlpha="0.25"
+                android:fillColor="#003B5C"
+                android:pathData="M57,33 L79,33 A4,4 0 0 1 83,37 L83,59 A4,4 0 0 1 79,63 L57,63 A4,4 0 0 1 53,59 L53,37 A4,4 0 0 1 57,33 Z" />
+            <!-- card body -->
+            <path
+                android:fillColor="#FFFFFF"
+                android:pathData="M55,31 L77,31 A4,4 0 0 1 81,35 L81,57 A4,4 0 0 1 77,61 L55,61 A4,4 0 0 1 51,57 L51,35 A4,4 0 0 1 55,31 Z" />
+            <!-- the "photo": sun over two mountain peaks -->
+            <path
+                android:fillColor="#37BBFE"
+                android:pathData="M57,34 m-3,0 a3,3 0 1,1 6,0 a3,3 0 1,1 -6,0" />
+            <path
+                android:fillColor="#2AABEE"
+                android:pathData="M53,56 L61,44 L67,52 L70,48 L77,56 Z" />
+        </group>
+
+        <!-- Cloud: white, drawn over the card so the card slides INTO it. -->
+        <group>
+            <!-- cloud shadow -->
+            <path
+                android:fillAlpha="0.2"
+                android:fillColor="#003B5C"
+                android:pathData="M38,76 C28,76 21,69 21,60 C21,51 28,44 38,44 C40,34 49,26 59,26 C70,26 79,33 81,43 C89,44 95,51 95,60 C95,69 89,76 81,76 Z" />
+            <!-- cloud body -->
+            <path
+                android:fillColor="#FFFFFF"
+                android:pathData="M37,73 C28,73 22,67 22,59 C22,51 28,45 37,45 C39,36 47,29 57,29 C67,29 75,35 78,44 C86,45 92,51 92,59 C92,67 86,73 78,73 Z" />
+            <!-- arrow notch: the "motion" of stashing, cut into the cloud top -->
+            <path
+                android:fillColor="#2AABEE"
+                android:pathData="M55,34 L63,43 L58,43 L58,52 L52,52 L52,43 L47,43 Z" />
+        </group>
     </group>
 </vector>

@@ -1,10 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Radial glow: bright core above center, deep telegram blue edges. -->
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="38"
+                android:gradientRadius="95"
+                android:startColor="#4FD0FE"
+                android:endColor="#0B5E92" />
+        </aapt:attr>
+    </path>
+    <!-- Soft top-left light bloom for depth. -->
     <path
-        android:fillColor="#2AABEE"
-        android:pathData="M0,0h108v108h-108z" />
+        android:fillAlpha="0.12"
+        android:fillColor="#FFFFFF"
+        android:pathData="M-20,-20 m0,0 a70,70 0 1,0 140,0 a70,70 0 1,0 -140,0" />
 </vector>
