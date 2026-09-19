@@ -25,6 +25,13 @@ kotlin {
     }
 }
 
+// detekt otherwise defaults --jvm-target to the Gradle JVM, so the check fails
+// on any JDK newer than the bundled analyzer supports. Pin it to the target
+// declared above so the result is the same on every machine.
+tasks.withType(io.gitlab.arturbosch.detekt.Detekt::class.java).configureEach {
+    jvmTarget = "17"
+}
+
 // Release signing keystore provided by CI env; null locally.
 val ciKeystoreFile: String? = System.getenv("KEYSTORE_FILE")
 
