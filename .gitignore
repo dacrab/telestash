@@ -12,3 +12,6 @@ build/
 *.apk
 *.aab
 !releases/*.apk
+
+# Local agent/tooling scratch (not part of the project)
+.freebuff/

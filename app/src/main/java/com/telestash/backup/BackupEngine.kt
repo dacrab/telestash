@@ -103,7 +103,10 @@ object BackupEngine {
             }
             return Outcome.UPLOADED
         } catch (e: TdException) {
-            throw e
+            // Only a rate limit is worth aborting the batch for: every other
+            // Telegram error is this item's problem and must not stop the rest.
+            if (e.isFloodWait) throw e
+            return Outcome.FAILED
         } catch (_: Exception) {
             return Outcome.FAILED
         } finally {

@@ -309,7 +309,8 @@ class AppViewModel(
             }
             dao.upsertAll(fetched)
             syncAlbums()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            _toasts.tryEmit("Could not load gallery: ${e.message}")
         } finally {
             _gallery.value = _gallery.value.copy(syncing = false)
         }
@@ -353,7 +354,11 @@ class AppViewModel(
         _gallery.value = cur.copy(loadingMore = true)
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val page = client!!.history(oldestLoaded, HISTORY_PAGE_SIZE)
+                // Re-read the client inside the coroutine: it can be torn down
+                // (logout / client reset) between the guard above and this body
+                // running, so the outer null check is not enough to deref it.
+                val c = client ?: return@launch
+                val page = c.history(oldestLoaded, HISTORY_PAGE_SIZE)
                 val entities =
                     page.messages
                         .filter { it.id < oldestLoaded }
@@ -362,7 +367,8 @@ class AppViewModel(
                     dao.upsertAll(entities)
                     oldestLoaded = entities.minOf { it.messageId }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                _toasts.tryEmit("Could not load more: ${e.message}")
             } finally {
                 _gallery.value = _gallery.value.copy(loadingMore = false)
             }
