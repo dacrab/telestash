@@ -185,8 +185,9 @@ class TgClient private constructor(
     /** Saved Messages chat id, resolved once via my_id -> createPrivateChat(force). */
     suspend fun savedMessagesChatId(): Long {
         if (cachedChatId != 0L) return cachedChatId
-        val myId = (send(TdApi.GetOption("my_id")) as TdApi.OptionValueInteger).value
-        cachedChatId = send(TdApi.CreatePrivateChat(myId, true)).id
+        val option = send(TdApi.GetOption("my_id")) as? TdApi.OptionValueInteger
+            ?: throw TdException(500, "my_id option is unavailable")
+        cachedChatId = send(TdApi.CreatePrivateChat(option.value, true)).id
         return cachedChatId
     }
 
