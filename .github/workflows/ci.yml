@@ -44,3 +44,6 @@ jobs:
           name: telestash-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          # Debug APKs are ~115 MB; a long retention fills the artifact
+          # storage quota fast. One week is plenty for a pull-to-install.
+          retention-days: 7
