@@ -6,12 +6,17 @@ local.properties
 .idea/
 .DS_Store
 build/
+.kotlin/
 /captures
 .externalNativeBuild
 .cxx
 *.apk
 *.aab
-!releases/*.apk
+
+# Signing material - never commit these
+*.jks
+*.keystore
+keystore.properties
 
 # Local agent/tooling scratch (not part of the project)
 .freebuff/

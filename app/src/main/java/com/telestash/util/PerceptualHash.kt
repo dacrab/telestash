@@ -45,7 +45,20 @@ object PerceptualHash {
                 inPreferredConfig = Bitmap.Config.RGB_565
             }
         val bmp = BitmapFactory.decodeFile(file.absolutePath, opts) ?: return null
+        return hashBitmap(bmp).also { bmp.recycle() }
+    }
 
+    /**
+     * Hash raw image bytes (e.g. a stored minithumbnail) without touching disk.
+     * Same 8x8 average-hash as [compute], so mini-derived hashes compare
+     * directly against full-file hashes for duplicate detection.
+     */
+    fun computeBytes(bytes: ByteArray): Long? {
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        return hashBitmap(bmp).also { bmp.recycle() }
+    }
+
+    private fun hashBitmap(bmp: Bitmap): Long {
         val scaled = bmp.scale(GRID, GRID, true)
         if (scaled !== bmp) bmp.recycle()
         val pixels = IntArray(GRID_CELLS)
@@ -65,7 +78,7 @@ object PerceptualHash {
         return lums.fold(0L) { hash, l -> (hash shl 1) or (if (l > avg) 1L else 0L) }
     }
 
-    fun distance(
+    private fun distance(
         a: Long,
         b: Long,
     ): Int = java.lang.Long.bitCount(a xor b)

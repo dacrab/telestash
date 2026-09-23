@@ -1,0 +1,12 @@
+# Normalize line endings across checkouts (gradlew is LF in the repo).
+* text=auto
+
+# Shell scripts must keep Unix endings even on Windows checkouts.
+*.sh text eol=lf
+gradlew text eol=lf
+
+# The TDLib fat-AAR is binary; keep git from interfering with it.
+*.aar binary
+
+# Generated/synth files don't belong in diffs.
+*.log text eol=lf

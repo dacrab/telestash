@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -23,13 +24,14 @@ private object Keys {
     val BACKUP_FOLDERS = stringPreferencesKey("backup_folders")
     val DEDUPE = booleanPreferencesKey("dedupe_enabled")
     val INSTANT_UPLOAD = booleanPreferencesKey("instant_upload_enabled")
+    val SYNC_NEWEST = longPreferencesKey("sync_newest_message_id")
+    val SYNC_OLDEST = longPreferencesKey("sync_oldest_message_id")
 }
 
-/** App settings backed by DataStore. */
 class SettingsRepository(
     private val context: Context,
 ) {
-    val credentials: Flow<Pair<Int, String>> =
+    private val credentials: Flow<Pair<Int, String>> =
         context.settings.data.map { p ->
             (p[Keys.API_ID] ?: 0) to (p[Keys.API_HASH] ?: "")
         }
@@ -50,7 +52,7 @@ class SettingsRepository(
     val wifiOnly: Flow<Boolean> = context.settings.data.map { it[Keys.WIFI_ONLY] ?: true }
     val chargingOnly: Flow<Boolean> = context.settings.data.map { it[Keys.CHARGING_ONLY] ?: false }
 
-    /** Comma-separated MediaStore bucket names to back up; empty = all folders. */
+    /** Comma-separated MediaStore bucket names; empty = all folders. */
     val backupFolders: Flow<Set<String>> =
         context.settings.data.map { p ->
             (p[Keys.BACKUP_FOLDERS] ?: "")
@@ -75,6 +77,21 @@ class SettingsRepository(
 
     suspend fun setDedupeEnabled(enabled: Boolean) {
         context.settings.edit { it[Keys.DEDUPE] = enabled }
+    }
+
+    /** Newest/oldest message ids captured by the last full gallery sync. */
+    suspend fun lastSyncedNewestId(): Long = context.settings.data.first()[Keys.SYNC_NEWEST] ?: 0L
+
+    suspend fun lastSyncedOldestId(): Long = context.settings.data.first()[Keys.SYNC_OLDEST] ?: Long.MAX_VALUE
+
+    suspend fun setSyncWatermark(
+        newest: Long,
+        oldest: Long,
+    ) {
+        context.settings.edit {
+            it[Keys.SYNC_NEWEST] = newest
+            it[Keys.SYNC_OLDEST] = oldest
+        }
     }
 
     suspend fun setAutoBackup(enabled: Boolean) {

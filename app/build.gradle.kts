@@ -7,7 +7,7 @@ plugins {
 }
 
 detekt {
-    config.setFrom(files("$rootDir/config/detekt.yml"))
+    config.setFrom(rootProject.layout.projectDirectory.file("config/detekt.yml"))
     buildUponDefaultConfig = true
 }
 
@@ -28,12 +28,14 @@ kotlin {
 // detekt otherwise defaults --jvm-target to the Gradle JVM, so the check fails
 // on any JDK newer than the bundled analyzer supports. Pin it to the target
 // declared above so the result is the same on every machine.
-tasks.withType(io.gitlab.arturbosch.detekt.Detekt::class.java).configureEach {
-    jvmTarget = "17"
+tasks.withType(dev.detekt.gradle.Detekt::class.java).configureEach {
+    jvmTarget.set("17")
 }
 
 // Release signing keystore provided by CI env; null locally.
-val ciKeystoreFile: String? = System.getenv("KEYSTORE_FILE")
+val ciKeystoreFile: String? = providers.environmentVariable("KEYSTORE_FILE").orNull
+
+val appVersion = "0.3.0"
 
 android {
     namespace = "com.telestash"
@@ -44,22 +46,28 @@ android {
         minSdk = 26
         targetSdk = 37
         versionCode = 3
-        versionName = "0.3.0"
+        versionName = appVersion
+        // TDLib reports this on log-in; keep it in sync with versionName.
+        buildConfigField("String", "APP_VERSION", "\"$appVersion\"")
     }
 
     signingConfigs {
         create("release") {
-            // Populated by CI (secrets -> env) for real releases.
             ciKeystoreFile?.let { storeFile = file(it) }
-            storePassword = System.getenv("KEYSTORE_PASSWORD")
-            keyAlias = System.getenv("KEY_ALIAS")
-            keyPassword = System.getenv("KEY_PASSWORD")
+            storePassword = providers.environmentVariable("KEYSTORE_PASSWORD").orNull
+            keyAlias = providers.environmentVariable("KEY_ALIAS").orNull
+            keyPassword = providers.environmentVariable("KEY_PASSWORD").orNull
         }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             // Without CI signing secrets the APK is debug-signed so it stays installable.
             signingConfig =
                 if (ciKeystoreFile != null) {
@@ -75,28 +83,26 @@ android {
     }
     buildFeatures {
         compose = true
-    }
-    packaging {
-        jniLibs {
-            useLegacyPackaging = false
-        }
+        buildConfig = true
     }
 }
 
 dependencies {
     implementation(files("libs/core-release.aar"))
-    implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.core)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.foundation)
     implementation(libs.androidx.ui)
-    implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons)
     implementation(libs.coil.compose)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.room.runtime)
-    implementation(libs.room.ktx)
+    implementation(libs.room.paging)
+    implementation(libs.paging.runtime)
+    implementation(libs.paging.compose)
     ksp(libs.room.compiler)
     implementation(libs.work.runtime)
     implementation(libs.datastore.prefs)

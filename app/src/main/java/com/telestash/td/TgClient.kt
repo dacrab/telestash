@@ -1,6 +1,7 @@
 package com.telestash.td
 
 import android.content.Context
+import com.telestash.BuildConfig
 import com.telestash.data.DbKeyStore
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -8,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -18,10 +20,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 class TdException(
-    val code: Int,
     override val message: String,
 ) : Exception(message) {
     val isFloodWait: Boolean get() = message.startsWith("FLOOD_WAIT_")
@@ -45,13 +47,18 @@ class TgClient private constructor(
     private val dbKey: ByteArray,
 ) {
     companion object {
-        private const val APP_VERSION = "0.3.0"
         private const val TOPICS_COLLECTION_TIMEOUT_MS = 3_000L
         private const val TOPICS_QUIET_PERIOD_MS = 250L
         private const val TOPICS_PAGE_LIMIT = 100
         private const val DOWNLOAD_PRIORITY = 16
         private const val LOG_MAX_SIZE_BYTES = 1L shl 22
         private const val UPDATE_REPLAY_BUFFER = 32
+
+        /**
+         * Uploads of large files take minutes; give the server enough time to
+         * acknowledge the bytes before a pass gives up and marks the item failed.
+         */
+        private const val SEND_CONFIRM_TIMEOUT_MS = 30L * 60 * 1000
 
         @Volatile private var instance: TgClient? = null
 
@@ -92,21 +99,38 @@ class TgClient private constructor(
         )
     val updates: SharedFlow<TdApi.Update> = _updates.asSharedFlow()
 
-    /** True after SetTdlibParameters succeeded; TDLib is then authorized-restorable. */
-    @Volatile var isStarted = false
+    /** True once TDLib confirmed a signed-in session (server-side or replayed). */
+    @Volatile var isAuthorized = false
         private set
+
+    /** Guards [start] against the UI and the backup worker racing on cold start. */
+    private val startAttempted = AtomicBoolean(false)
 
     private var cachedChatId = 0L
 
     internal val native: Client =
         Client.create(
-            { update -> if (update is TdApi.Update) scope.launch { _updates.emit(update) } },
+            // tryEmit, not scope.launch { emit }: a progress flood would otherwise
+            // spawn one coroutine per update and race concurrent sends into the flow.
+            { update -> if (update is TdApi.Update) _updates.tryEmit(update) },
             { /* update handler exception */ },
             { /* default exception */ },
         )
 
     init {
-        runCatching { Client.execute(TdApi.SetLogVerbosityLevel(2)) }
+        // Track the session's own auth state: lets background callers (the
+        // backup worker) tell a replayed sign-in from one that needs a login.
+        scope.launch {
+            updates
+                .filterIsInstance<TdApi.UpdateAuthorizationState>()
+                .collect { u ->
+                    if (u.authorizationState is TdApi.AuthorizationStateReady) {
+                        isAuthorized = true
+                    }
+                }
+        }
+        runCatching { Client.execute(TdApi.SetLogVerbosityLevel(1)) }
+        runCatching { Client.execute(TdApi.SetOption("redact_phone_numbers", TdApi.OptionValueBoolean(true))) }
         runCatching {
             val logDir = File("$tdlibDir-logs").apply { mkdirs() }
             Client.execute(
@@ -121,10 +145,20 @@ class TgClient private constructor(
         }
     }
 
-    /** Configure TDLib; safe to call exactly once per client instance. */
+    /**
+     * Configure TDLib; safe to call once per client instance (guarded, so the
+     * UI and the backup worker can both call it on a cold start). Sending
+     * SetTdlibParameters is what triggers the session replay from the local
+     * database; authorization then arrives asynchronously as
+     * [TdApi.AuthorizationStateReady] and flips [isAuthorized].
+     */
     suspend fun start() {
-        send(tdlibParameters())
-        isStarted = true
+        if (!startAttempted.compareAndSet(false, true)) return
+        runCatching { send(tdlibParameters()) }
+            .onFailure { e ->
+                startAttempted.set(false)
+                throw e
+            }
     }
 
     private fun tdlibParameters(): TdApi.SetTdlibParameters {
@@ -146,11 +180,9 @@ class TgClient private constructor(
             "en",
             android.os.Build.MODEL,
             android.os.Build.VERSION.RELEASE,
-            APP_VERSION,
+            BuildConfig.APP_VERSION,
         )
     }
-
-    // ---------- auth ----------
 
     suspend fun setPhone(phone: String) {
         send(
@@ -180,13 +212,12 @@ class TgClient private constructor(
         runCatching { send(TdApi.LogOut()) }
     }
 
-    // ---------- messaging ----------
-
     /** Saved Messages chat id, resolved once via my_id -> createPrivateChat(force). */
     suspend fun savedMessagesChatId(): Long {
         if (cachedChatId != 0L) return cachedChatId
-        val option = send(TdApi.GetOption("my_id")) as? TdApi.OptionValueInteger
-            ?: throw TdException(500, "my_id option is unavailable")
+        val option =
+            send(TdApi.GetOption("my_id")) as? TdApi.OptionValueInteger
+                ?: throw TdException("my_id option is unavailable")
         cachedChatId = send(TdApi.CreatePrivateChat(option.value, true)).id
         return cachedChatId
     }
@@ -257,19 +288,64 @@ class TgClient private constructor(
         topicId: Long = 0L,
     ): TdApi.Message {
         val topic = if (topicId > 0) TdApi.MessageTopicSavedMessages(topicId) else null
-        return send(
-            TdApi.SendMessage(
-                savedMessagesChatId(),
-                topic,
-                null,
-                null,
-                null,
-                TdApi.InputMessageDocument(
-                    TdApi.InputDocument(TdApi.InputFileLocal(path), null, false),
-                    TdApi.FormattedText("telestash:$fileName", arrayOf()),
+        val sent =
+            send(
+                TdApi.SendMessage(
+                    savedMessagesChatId(),
+                    topic,
+                    null,
+                    null,
+                    null,
+                    TdApi.InputMessageDocument(
+                        TdApi.InputDocument(TdApi.InputFileLocal(path), null, false),
+                        TdApi.FormattedText("telestash:$fileName", arrayOf()),
+                    ),
                 ),
-            ),
-        )
+            )
+        return confirmSent(sent.id)
+    }
+
+    /**
+     * SendMessage returns the local placeholder as soon as the file is queued,
+     * not when the server holds the bytes. Waiting for the send result means a
+     * caller only records an item once Telegram actually has it — a process
+     * death mid-upload then leaves the item pending instead of silently "done".
+     */
+    private suspend fun confirmSent(messageId: Long): TdApi.Message {
+        val events = Channel<TdApi.Update>(Channel.BUFFERED)
+        val collector =
+            scope.launch {
+                updates.collect { u ->
+                    if (u is TdApi.UpdateMessageSendSucceeded || u is TdApi.UpdateMessageSendFailed) {
+                        events.trySend(u)
+                    }
+                }
+            }
+        try {
+            val outcome =
+                withTimeoutOrNull(SEND_CONFIRM_TIMEOUT_MS) {
+                    var found: TdApi.Update? = null
+                    while (found == null) {
+                        val u = events.receive()
+                        val isOurs =
+                            when (u) {
+                                is TdApi.UpdateMessageSendSucceeded -> u.message.id == messageId
+                                is TdApi.UpdateMessageSendFailed -> u.message.id == messageId
+                                else -> false
+                            }
+                        if (isOurs) found = u
+                    }
+                    found
+                } ?: throw TdException("UPLOAD_TIMEOUT")
+            return when (outcome) {
+                is TdApi.UpdateMessageSendSucceeded -> outcome.message
+                is TdApi.UpdateMessageSendFailed ->
+                    throw TdException("upload rejected: ${outcome.error.message}")
+                else -> error("unreachable")
+            }
+        } finally {
+            collector.cancel()
+        }
     }
 
     /** Move messages into an album topic: forward as copies, then delete originals. */
@@ -320,14 +396,12 @@ class TgClient private constructor(
         send(TdApi.DeleteMessages(chatId, messageIds, true))
     }
 
-    // ---------- plumbing ----------
-
     @Suppress("UNCHECKED_CAST")
     suspend fun <T : TdApi.Object> send(function: TdApi.Function<T>): T {
         val d = CompletableDeferred<TdApi.Object>()
         native.send(function) { result ->
             if (result is TdApi.Error) {
-                d.completeExceptionally(TdException(result.code, result.message))
+                d.completeExceptionally(TdException(result.message))
             } else {
                 d.complete(result)
             }
