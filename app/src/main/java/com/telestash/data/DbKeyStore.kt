@@ -13,9 +13,8 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Generates and stores the TDLib database encryption key wrapped by Android Keystore.
- * The plaintext key never leaves the keystore boundary unencrypted at rest: we store
- * only a Keystore-wrapped (AES/GCM) copy in app preferences.
+ * TDLib database encryption key wrapped by Android Keystore; only the
+ * Keystore-AES/GCM-wrapped copy is stored in preferences.
  */
 object DbKeyStore {
     private const val KS_ALIAS = "telestash_tdlib_key"
@@ -27,27 +26,24 @@ object DbKeyStore {
     private const val GCM_TAG_BITS = 128
 
     /**
-     * Returns the raw TDLib database encryption key (64 random bytes).
-     * First call generates it; subsequent calls decrypt the stored copy with the
-     * Keystore key.
+     * Returns the raw TDLib database encryption key (64 random bytes), generating
+     * it on first call. If the wrapped copy no longer decrypts (Keystore entry
+     * invalidated by a lock-screen/OS change), it is discarded and replaced.
      */
     @Synchronized
     fun tdlibKey(context: Context): ByteArray {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val stored = prefs.getString(PREF_KEY, null)
-
-        val key: ByteArray =
-            if (stored != null) {
-                unwrap(stored)
-            } else {
-                SecureRandom()
-                    .let { r ->
-                        ByteArray(TDLIB_KEY_BYTES).also { r.nextBytes(it) }
-                    }.also { fresh ->
-                        prefs.edit { putString(PREF_KEY, wrap(fresh)) }
-                    }
-            }
-        return key
+        if (stored == null) {
+            val fresh = ByteArray(TDLIB_KEY_BYTES).also { SecureRandom().nextBytes(it) }
+            prefs.edit { putString(PREF_KEY, wrap(fresh)) }
+            return fresh
+        }
+        return runCatching { unwrap(stored) }.getOrElse {
+            val fresh = ByteArray(TDLIB_KEY_BYTES).also { SecureRandom().nextBytes(it) }
+            prefs.edit { putString(PREF_KEY, wrap(fresh)) }
+            fresh
+        }
     }
 
     private fun keystoreKey(): SecretKey {

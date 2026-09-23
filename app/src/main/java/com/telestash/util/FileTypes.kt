@@ -5,7 +5,6 @@ object FileTypes {
     private val VIDEO_EXTENSIONS =
         setOf("mp4", "mov", "mkv", "avi", "webm", "3gp", "m4v")
 
-    /** Guess "is a video" from the file extension alone. */
     fun isVideoName(name: String): Boolean {
         val ext = name.substringAfterLast('.', "").lowercase()
         return ext in VIDEO_EXTENSIONS

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
@@ -30,26 +31,43 @@ private const val MAX_ALBUM_NAME = 64
 @Composable
 fun NewAlbumDialog(
     vm: AppViewModel,
+    albums: List<AlbumEntity>,
     onDismiss: () -> Unit,
 ) {
     var name by remember { mutableStateOf("") }
+    val trimmed = name.trim()
+    val duplicate = albums.any { it.name.equals(trimmed, ignoreCase = true) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("New album") },
         text = {
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it.take(MAX_ALBUM_NAME) },
-                label = { Text("Album name") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            Column {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(MAX_ALBUM_NAME) },
+                    label = { Text("Album name") },
+                    isError = trimmed.isNotBlank() && duplicate,
+                    supportingText = {
+                        if (trimmed.isNotBlank() && duplicate) {
+                            Text("An album with this name already exists.")
+                        }
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Albums live as topics in your Saved Messages. Backed-up photos can be moved into them later.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         },
         confirmButton = {
             TextButton(
-                enabled = name.isNotBlank(),
+                enabled = trimmed.isNotBlank() && !duplicate,
                 onClick = {
-                    vm.createAlbum(name.trim())
+                    vm.createAlbum(trimmed)
                     onDismiss()
                 },
             ) { Text("Create") }
@@ -99,6 +117,9 @@ fun AddToAlbumDialog(
                         if (newAlbumName.isNotBlank()) chosenExisting = null
                     },
                     label = { Text("New album name") },
+                    supportingText = {
+                        Text("Selected items move out of the main timeline into this album.")
+                    },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )

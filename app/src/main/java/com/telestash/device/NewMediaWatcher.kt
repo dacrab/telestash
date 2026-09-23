@@ -70,8 +70,7 @@ class NewMediaWatcher(
         debounceJob = null
     }
 
-    /** Find new, not-yet-backed-up media and report it via the callback. */
-    suspend fun notifyPending() {
+    private suspend fun notifyPending() {
         if (TgClient.peek() == null) return
         val dao = StashDbHolder.db(context).itemDao()
         val settings = SettingsRepository(context)

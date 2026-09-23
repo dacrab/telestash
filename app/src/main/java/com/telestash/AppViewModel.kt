@@ -6,6 +6,12 @@ import android.net.Uri
 import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.PagingData
+import androidx.paging.cachedIn
+import androidx.paging.insertSeparators
+import androidx.paging.map
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -20,33 +26,35 @@ import com.telestash.data.AlbumEntity
 import com.telestash.data.ItemEntity
 import com.telestash.data.SettingsRepository
 import com.telestash.data.StashDbHolder
+import com.telestash.data.TopicStats
 import com.telestash.device.DeviceMedia
 import com.telestash.device.NewMediaWatcher
 import com.telestash.device.PendingMedia
 import com.telestash.model.StashItem
 import com.telestash.model.messageToEntity
-import com.telestash.model.toEntity
 import com.telestash.model.toStashItem
 import com.telestash.td.TdException
 import com.telestash.td.TgClient
+import com.telestash.ui.gallery.TimelineRow
 import com.telestash.util.FileTypes
-import com.telestash.util.PerceptualHash
+import com.telestash.util.Format
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.drinkless.tdlib.TdApi
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -72,10 +80,11 @@ sealed interface AuthUi {
 }
 
 data class GalleryUi(
-    val items: List<StashItem> = emptyList(),
     val albums: List<AlbumEntity> = emptyList(),
     val loadingMore: Boolean = false,
     val syncing: Boolean = false,
+    /** Last sync attempt failed; the gallery may be stale or empty. */
+    val syncError: Boolean = false,
     /** Non-null = multi-select mode active with these message ids. */
     val selected: Set<Long>? = null,
     /** 0 = main gallery; otherwise the open album topic id. */
@@ -90,14 +99,33 @@ class AppViewModel(
     companion object {
         const val MIN_API_HASH_LENGTH = 8
         const val HISTORY_PAGE_SIZE = 100
-        const val SYNC_MAX_ITEMS = 1000
+
+        /** Initial cloud-history sync cap; endless scroll appends beyond it. */
+        const val SYNC_MAX_ITEMS = 4000
+
+        /** Pages fetched per endless-scroll trigger (300 items). */
+        const val LOAD_MORE_PAGES = 3
         const val PICK_LIMIT = 100
         const val SCROLL_PRELOAD_THRESHOLD = 12
         const val BACKUP_INTERVAL_HOURS = 6L
         const val BACKOFF_SECONDS = 30L
-        const val MAX_FAILED_NAMES_IN_TOAST = 3
         const val ALBUM_CAPTION_PREFIX = "telestash-album:"
+        const val FILTER_ALL = -1
+        const val FILTER_PHOTOS = 0
+        const val FILTER_VIDEOS = 1
+        const val TAB_PHOTOS = 0
+        const val TAB_ALBUMS = 1
+        const val TAB_SETTINGS = 2
+        private const val TIMELINE_PAGE_SIZE = 60
+        private const val TIMELINE_PREFETCH_DISTANCE = 30
+        private const val TIMELINE_MAX_SIZE = 300
         private const val SECONDS_PER_MINUTE = 60
+
+        /** Room writes below 4000 rows can lock long enough to jank the grid. */
+        private const val SYNC_UPSERT_CHUNK = 500
+
+        /** How long logout waits for TDLib to drop the session before reset. */
+        private const val LOGOUT_TIMEOUT_MS = 15_000L
     }
 
     private val settings = SettingsRepository(app)
@@ -114,8 +142,8 @@ class AppViewModel(
     val gallery: StateFlow<GalleryUi> = _gallery.asStateFlow()
 
     /** Upload progress (done, total); separate flow so the grid never recomposes per item. */
-    private val _uploadProgress = MutableStateFlow<Pair<Int, Int>?>(null)
-    val uploadProgress: StateFlow<Pair<Int, Int>?> = _uploadProgress.asStateFlow()
+    private val _uploadProgress = MutableStateFlow<UploadProgress?>(null)
+    val uploadProgress: StateFlow<UploadProgress?> = _uploadProgress.asStateFlow()
 
     private val _toasts = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val toasts: SharedFlow<String> = _toasts.asSharedFlow()
@@ -131,11 +159,85 @@ class AppViewModel(
     val dedupeEnabled = settings.dedupeEnabled
     val instantUpload = settings.instantUpload
 
+    /** -1 = all media, 0 = photos only, 1 = videos only. */
+    private val _mediaFilter = MutableStateFlow(FILTER_ALL)
+    val mediaFilter: StateFlow<Int> = _mediaFilter.asStateFlow()
+
+    /** Bottom-navigation tab: Photos / Albums / Settings. */
+    private val _selectedTab = MutableStateFlow(TAB_PHOTOS)
+    val selectedTab: StateFlow<Int> = _selectedTab.asStateFlow()
+
+    /** Item counts per album, for the Albums tab "N photos" labels. */
+    val albumCounts: Flow<List<TopicStats>> = dao.observeTopicCounts()
+
+    /**
+     * Switch tabs. Leaving the Photos tab (back out of an album, or direct
+     * tab tap while a topic is open) returns the timeline to the main library.
+     */
+    fun selectTab(tab: Int) {
+        if (tab == TAB_PHOTOS && _selectedTab.value == TAB_ALBUMS && _gallery.value.openTopicId != 0L) {
+            closeTopic()
+        }
+        _selectedTab.value = tab
+    }
+
+    /** Re-pull the newest page and fold any new remote media into Room. */
+    fun refresh() {
+        if (client == null || _gallery.value.syncing) return
+        viewModelScope.launch(Dispatchers.IO) { syncAll() }
+    }
+
+    fun setMediaFilter(filter: Int) {
+        _mediaFilter.value = filter
+    }
+
+    /**
+     * Paged gallery timeline: Room pages stay bounded in memory. Month
+     * separators are fused into the stream, and it rebuilds on topic or
+     * filter change.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val galleryPaging: Flow<PagingData<TimelineRow>> =
+        combine(
+            _gallery.map { it.openTopicId }.distinctUntilChanged(),
+            _mediaFilter,
+            ::Pair,
+        ).flatMapLatest { (topicId, filter) ->
+            Pager(
+                config =
+                    PagingConfig(
+                        pageSize = TIMELINE_PAGE_SIZE,
+                        prefetchDistance = TIMELINE_PREFETCH_DISTANCE,
+                        enablePlaceholders = false,
+                        maxSize = TIMELINE_MAX_SIZE,
+                    ),
+                pagingSourceFactory = {
+                    if (topicId == 0L) {
+                        dao.pagingMainItems(filter)
+                    } else {
+                        dao.pagingTopicItems(topicId, filter)
+                    }
+                },
+            ).flow
+                .map { pagingData ->
+                    pagingData
+                        .map { TimelineRow.Photo(it.toStashItem()) }
+                        .insertSeparators { before, after ->
+                            val afterMonth =
+                                after?.let { Format.monthYear(it.item.date) }
+                                    ?: return@insertSeparators null
+                            val beforeMonth =
+                                before?.let { Format.monthYear(it.item.date) }
+                            if (afterMonth != beforeMonth) TimelineRow.Month(afterMonth) else null
+                        }
+                }
+        }.cachedIn(viewModelScope)
+
     /** Watches MediaStore and either auto-uploads or banners new device media. */
     private val newMediaWatcher =
         NewMediaWatcher(getApplication(), viewModelScope) { pending, autoUpload ->
             if (autoUpload) {
-                uploadPendingItems(pending)
+                uploadPendingItems(pending, auto = true)
             } else {
                 _gallery.value = _gallery.value.copy(newMediaCount = pending.size)
             }
@@ -146,6 +248,7 @@ class AppViewModel(
         if (started) return
         started = true
         viewModelScope.launch(Dispatchers.IO) {
+            BackupEngine.sweepStaleStaged(getApplication())
             val (apiId, apiHash) = settings.credentialsOnce()
             if (apiId == 0 || apiHash.isBlank()) {
                 _auth.value = AuthUi.NeedCredentials
@@ -166,22 +269,8 @@ class AppViewModel(
         }
     }
 
-    /** Room -> UI. flatMapLatest keyed on topic only, so selection/state changes
-     * don't re-run the underlying query. */
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    /** Room -> UI: album chips. The photo timeline itself pages via galleryPaging. */
     private fun observeGallery() {
-        viewModelScope.launch {
-            _gallery
-                .map { it.openTopicId }
-                .distinctUntilChanged()
-                .flatMapLatest { topicId ->
-                    if (topicId == 0L) dao.observeMainItems() else dao.observeTopic(topicId)
-                }.collect { entities ->
-                    _gallery.value = _gallery.value.copy(items = entities.map { it.toStashItem() })
-                    val min = entities.minOfOrNull { it.messageId } ?: Long.MAX_VALUE
-                    if (min < oldestLoaded) oldestLoaded = min
-                }
-        }
         viewModelScope.launch {
             dao.observeAlbums().collect { albums ->
                 _gallery.value = _gallery.value.copy(albums = albums)
@@ -209,7 +298,6 @@ class AppViewModel(
                     is TdApi.AuthorizationStateReady -> {
                         _auth.value = AuthUi.Ready
                         runCatching { syncAll() }
-                        // Watch for new camera-roll media while signed in.
                         newMediaWatcher.start()
                     }
                     else -> Unit
@@ -229,8 +317,6 @@ class AppViewModel(
             else -> "Code sent"
         }
 
-    // ---------- credentials onboarding ----------
-
     fun saveCredentials(
         apiId: String,
         apiHash: String,
@@ -243,7 +329,6 @@ class AppViewModel(
         settings.setCredentials(id, apiHash.trim())
         _toasts.tryEmit("Saved. Starting Telegram client...")
 
-        // recreate the client and wire everything up again via start()
         TgClient.shutdown()
         client = null
         started = false
@@ -251,7 +336,14 @@ class AppViewModel(
         start()
     }
 
-    // ---------- auth actions ----------
+    /** Step back to the phone field from code/password/registration steps. */
+    fun backToAuthStep() {
+        _authError.value = null
+        when (_auth.value) {
+            is AuthUi.Code, is AuthUi.Password, is AuthUi.Registration -> _auth.value = AuthUi.Phone
+            else -> Unit
+        }
+    }
 
     private val authBusy = MutableStateFlow(false)
     val authBusyPublic: StateFlow<Boolean> = authBusy.asStateFlow()
@@ -293,12 +385,22 @@ class AppViewModel(
         }
     }
 
-    // ---------- gallery sync ----------
-
     private suspend fun syncAll() {
         val c = client ?: return
-        _gallery.value = _gallery.value.copy(syncing = true)
+        _gallery.value = _gallery.value.copy(syncing = true, syncError = false)
         try {
+            // One cheap page first: if history is unchanged since the last sync
+            // there is nothing new to fetch, so skip the full 4000-message
+            // refetch (and the Room invalidation churn it causes) on every launch.
+            val newestPage = c.history(0L, HISTORY_PAGE_SIZE)
+            val newestId = newestPage.messages.firstOrNull()?.id ?: 0L
+            if (
+                newestId != 0L &&
+                newestId == settings.lastSyncedNewestId() &&
+                settings.lastSyncedOldestId() != Long.MAX_VALUE
+            ) {
+                return
+            }
             var fromId = 0L
             val fetched = mutableListOf<ItemEntity>()
             while (fetched.size < SYNC_MAX_ITEMS) {
@@ -307,9 +409,16 @@ class AppViewModel(
                 fetched.addAll(page.messages.mapNotNull { messageToEntity(it) })
                 fromId = page.messages.last().id
             }
-            dao.upsertAll(fetched)
+            upsertChunked(fetched)
+            val min = fetched.minOfOrNull { it.messageId } ?: Long.MAX_VALUE
+            if (min < oldestLoaded) oldestLoaded = min
+            settings.setSyncWatermark(newestId, min)
             syncAlbums()
+            // Seed hashes for rows synced without them so the next backup
+            // recognizes already-stored photos without downloading.
+            galleryCleanup.backfillHashes()
         } catch (e: Exception) {
+            _gallery.value = _gallery.value.copy(syncError = true)
             _toasts.tryEmit("Could not load gallery: ${e.message}")
         } finally {
             _gallery.value = _gallery.value.copy(syncing = false)
@@ -323,7 +432,7 @@ class AppViewModel(
             for (t in topics) {
                 runCatching {
                     val msgs = c.topicHistory(t.id, 0L, HISTORY_PAGE_SIZE)
-                    dao.upsertAll(msgs.messages.mapNotNull { messageToEntity(it, topicId = t.id) })
+                    upsertChunked(msgs.messages.mapNotNull { messageToEntity(it, topicId = t.id) })
                     // Topics carry no name field; the album name lives in the
                     // first message's "telestash-album:" caption. Never clobber
                     // a locally known name with a fallback.
@@ -354,17 +463,22 @@ class AppViewModel(
         _gallery.value = cur.copy(loadingMore = true)
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // Re-read the client inside the coroutine: it can be torn down
-                // (logout / client reset) between the guard above and this body
-                // running, so the outer null check is not enough to deref it.
+                // Re-read inside the coroutine: the client can be torn down
+                // between the guard above and this body running.
                 val c = client ?: return@launch
-                val page = c.history(oldestLoaded, HISTORY_PAGE_SIZE)
-                val entities =
-                    page.messages
-                        .filter { it.id < oldestLoaded }
-                        .mapNotNull { messageToEntity(it) }
+                // Several pages per trigger: one page makes deep scrolling feel stuttery.
+                val entities = mutableListOf<ItemEntity>()
+                var fromId = oldestLoaded
+                var pagesLeft = LOAD_MORE_PAGES
+                while (pagesLeft-- > 0) {
+                    val page = c.history(fromId, HISTORY_PAGE_SIZE)
+                    val fresh = page.messages.filter { it.id < fromId }
+                    if (fresh.isEmpty()) break
+                    entities += fresh.mapNotNull { messageToEntity(it) }
+                    fromId = fresh.minOf { it.id }
+                }
                 if (entities.isNotEmpty()) {
-                    dao.upsertAll(entities)
+                    upsertChunked(entities)
                     oldestLoaded = entities.minOf { it.messageId }
                 }
             } catch (e: Exception) {
@@ -375,7 +489,10 @@ class AppViewModel(
         }
     }
 
-    // ---------- albums ----------
+    /** Upserts in bounded chunks so a huge sync can't drench Room in one go. */
+    private suspend fun upsertChunked(items: List<ItemEntity>) {
+        items.chunked(SYNC_UPSERT_CHUNK).forEach { dao.upsertAll(it) }
+    }
 
     fun openTopic(topicId: Long) {
         _gallery.value = _gallery.value.copy(openTopicId = topicId, selected = null)
@@ -384,7 +501,7 @@ class AppViewModel(
                 val c = client ?: return@launch
                 runCatching {
                     val msgs = c.topicHistory(topicId, 0L, HISTORY_PAGE_SIZE)
-                    dao.upsertAll(msgs.messages.mapNotNull { messageToEntity(it, topicId) })
+                    upsertChunked(msgs.messages.mapNotNull { messageToEntity(it, topicId = topicId) })
                 }
             }
         }
@@ -404,22 +521,6 @@ class AppViewModel(
             }.onFailure { e -> _toasts.tryEmit("Could not create album: ${e.message}") }
         }
 
-    fun deleteAlbum(topicId: Long) =
-        viewModelScope.launch(Dispatchers.IO) {
-            val c = client ?: return@launch
-            runCatching {
-                val msgs = c.topicHistory(topicId, 0L, HISTORY_PAGE_SIZE)
-                if (msgs.messages.isNotEmpty()) {
-                    c.deleteMessages(
-                        msgs.messages.first().chatId,
-                        msgs.messages.map { it.id }.toLongArray(),
-                    )
-                }
-                dao.deleteAlbum(topicId)
-                _toasts.tryEmit("Album deleted")
-            }.onFailure { e -> _toasts.tryEmit("Could not delete album: ${e.message}") }
-        }
-
     /** Add currently selected items to an album (existing or newly created). */
     fun addSelectedToAlbum(
         albumTopicId: Long,
@@ -432,7 +533,7 @@ class AppViewModel(
             val topicId = newAlbumName?.let { c.createAlbumTopic(it) } ?: albumTopicId
             val moved = c.moveToTopic(sel.toLongArray(), topicId)
             dao.deleteAll(sel.toList())
-            dao.upsertAll(moved.mapNotNull { messageToEntity(it, topicId = topicId) })
+            upsertChunked(moved.mapNotNull { messageToEntity(it, topicId = topicId) })
             if (newAlbumName != null) {
                 dao.upsertAlbums(
                     listOf(AlbumEntity(topicId, newAlbumName, System.currentTimeMillis())),
@@ -442,8 +543,6 @@ class AppViewModel(
         }.onFailure { e -> _toasts.tryEmit("Move failed: ${e.message}") }
         exitSelectionMode()
     }
-
-    // ---------- selection ----------
 
     fun toggleSelect(id: Long) {
         val cur = _gallery.value
@@ -459,176 +558,49 @@ class AppViewModel(
         _gallery.value = _gallery.value.copy(selected = null)
     }
 
-    fun selectAll() {
-        val items = _gallery.value.items
-        _gallery.value = _gallery.value.copy(selected = items.map { it.messageId }.toSet())
-        if (items.size < SYNC_MAX_ITEMS) return
-        // Endless scroll means "all" is really "all loaded so far".
-        _toasts.tryEmit("Selected ${items.size} loaded items - scroll down to load more")
+    fun selectAll(loaded: List<StashItem>) {
+        _gallery.value = _gallery.value.copy(selected = loaded.map { it.messageId }.toSet())
+        if (loaded.size < SYNC_MAX_ITEMS) return
+        // Paged timeline: "all" is really "all loaded so far".
+        _toasts.tryEmit("Selected ${loaded.size} loaded items - scroll down to load more")
     }
 
-    // ---------- uploads ----------
-
-    private enum class UploadOutcome { UPLOADED, SKIPPED_DUPLICATE, FAILED }
-
-    private val uploadMutex = Mutex()
+    private val uploader by lazy {
+        Uploader(
+            viewModelScope,
+            getApplication<Application>(),
+            dao,
+            settings,
+            { client },
+            _uploadProgress,
+            { _gallery.value = _gallery.value.copy(newMediaCount = 0) },
+        ) { msg -> _toasts.tryEmit(msg) }
+    }
 
     /** Dismiss the "new media detected" banner without uploading. */
     fun dismissNewMedia() {
         _gallery.value = _gallery.value.copy(newMediaCount = 0)
     }
 
-    /**
-     * Scan for not-yet-backed-up device media and upload it (new-media banner,
-     * instant upload, settings toggle).
-     */
-    fun uploadPending() {
-        if (_uploadProgress.value != null) return
-        viewModelScope.launch(Dispatchers.IO) {
-            val app = getApplication<Application>()
-            val pending =
-                BackupEngine.pending(app, dao, settings.backupFolders.first())
-            _gallery.value = _gallery.value.copy(newMediaCount = 0)
-            uploadPendingItems(pending)
-        }
-    }
+    fun uploadPending(auto: Boolean = false) = uploader.uploadPending(auto)
 
     /** Upload an already-scanned pending list (from the new-media watcher). */
-    fun uploadPendingItems(pending: List<PendingMedia>) {
-        if (_uploadProgress.value != null || pending.isEmpty()) return
-        viewModelScope.launch(Dispatchers.IO) {
-            val c = client ?: return@launch
-            uploadMutex.withLock {
-                val app = getApplication<Application>()
-                val summary =
-                    runCatching {
-                        BackupEngine.backupAll(
-                            app,
-                            c,
-                            dao,
-                            pending,
-                            settings.dedupeEnabled.first(),
-                        ) { done, total -> _uploadProgress.value = done to total }
-                    }.getOrElse { e ->
-                        if (e is TdException && e.isFloodWait) {
-                            _toasts.tryEmit(
-                                "Backup paused: Telegram asks to wait ${e.floodWaitSeconds}s",
-                            )
-                        }
-                        BackupEngine.Summary(0, 0, emptyList())
-                    }
-                _uploadProgress.value = null
-                _toasts.tryEmit(uploadSummary(pending.size, summary))
-            }
-        }
-    }
+    fun uploadPendingItems(
+        pending: List<PendingMedia>,
+        auto: Boolean = false,
+    ) = uploader.uploadPendingItems(pending, auto)
 
-    /** "Backed up N", "…, failed k: names" or "Backup failed: names". */
-    private fun uploadSummary(
-        total: Int,
-        s: BackupEngine.Summary,
-    ): String =
-        when {
-            s.failed == 0 -> "Backed up $total new item(s)"
-            s.uploaded > 0 ->
-                "Backed up ${s.uploaded}, failed ${s.failed}: " +
-                    s.failedNames.take(MAX_FAILED_NAMES_IN_TOAST).joinToString()
-            else -> "Backup failed: " + s.failedNames.take(MAX_FAILED_NAMES_IN_TOAST).joinToString()
-        }
-
+    /** Upload manually picked media, optionally into an album topic. */
     fun upload(
         uris: List<Uri>,
         topicId: Long = 0L,
-    ) = viewModelScope.launch(Dispatchers.IO) {
-        val c = client ?: return@launch
-        uploadMutex.withLock {
-            val dedupe = settings.dedupeEnabled.first()
-            var failed = 0
-            val failedNames = mutableListOf<String>()
-
-            uris.forEachIndexed { i, uri ->
-                _uploadProgress.value = i to uris.size
-                if (uploadOne(c, uri, topicId, dedupe) == UploadOutcome.FAILED) {
-                    failed++
-                    failedNames.add(queryDisplayName(getApplication(), uri) ?: "file ${i + 1}")
-                }
-            }
-            _uploadProgress.value = null
-
-            val ok = uris.size - failed
-            val failedSample = failedNames.take(MAX_FAILED_NAMES_IN_TOAST).joinToString()
-            _toasts.tryEmit(
-                when {
-                    failed == 0 -> "Uploaded ${uris.size} file(s)"
-                    ok > 0 -> "Uploaded $ok, failed $failed: $failedSample"
-                    else -> "Upload failed: $failedSample"
-                },
-            )
-        }
-    }
-
-    private suspend fun uploadOne(
-        c: TgClient,
-        uri: Uri,
-        topicId: Long,
-        dedupe: Boolean,
-    ): UploadOutcome {
-        val staged = stageUri(uri) ?: return UploadOutcome.FAILED
-        try {
-            val phash =
-                if (dedupe && !FileTypes.isVideoName(staged.name)) {
-                    PerceptualHash.compute(staged) ?: 0L
-                } else {
-                    0L
-                }
-
-            if (phash != 0L && dao.allPhashes().any { PerceptualHash.isProbablyDuplicate(it, phash) }) {
-                return UploadOutcome.SKIPPED_DUPLICATE
-            }
-
-            val msg = c.uploadDocument(staged.absolutePath, staged.name, topicId)
-            StashItem.fromMessage(msg)?.let {
-                dao.upsertAll(listOf(it.toEntity(deviceUri = uri.toString(), phash = phash)))
-            }
-            return UploadOutcome.UPLOADED
-        } catch (_: Exception) {
-            return UploadOutcome.FAILED
-        } finally {
-            staged.delete()
-        }
-    }
-
-    /** Copy a content uri into the cache dir so TDLib can send it by local path. */
-    private fun stageUri(uri: Uri): File? {
-        val resolver = getApplication<Application>().contentResolver
-        val name =
-            queryDisplayName(resolver, uri)
-                ?: "photo_${System.currentTimeMillis()}.jpg"
-        // disambiguate same-named picks within one session
-        val dir = File(getApplication<Application>().cacheDir, "upload").apply { mkdirs() }
-        val staged = File(dir, "${System.currentTimeMillis()}_$name")
-        return resolver.openInputStream(uri)?.use { input ->
-            staged.outputStream().use { input.copyTo(it) }
-            staged
-        }
-    }
-
-    private fun queryDisplayName(
-        resolver: android.content.ContentResolver,
-        uri: Uri,
-    ): String? =
-        resolver
-            .query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
-            ?.use { csr -> if (csr.moveToFirst()) csr.getString(0) else null }
-
-    // ---------- item actions ----------
+    ) = uploader.upload(uris, topicId)
 
     fun download(item: StashItem) = downloadItems(listOf(item))
 
-    fun downloadSelected() {
+    fun downloadSelected(loaded: List<StashItem>) {
         val sel = _gallery.value.selected ?: return
-        val items = _gallery.value.items.filter { it.messageId in sel }
-        downloadItems(items) // exits selection mode when done
+        downloadItems(loaded.filter { it.messageId in sel })
     }
 
     private fun downloadItems(items: List<StashItem>) =
@@ -648,10 +620,9 @@ class AppViewModel(
 
     fun delete(item: StashItem) = deleteItems(listOf(item))
 
-    fun deleteSelected() {
+    fun deleteSelected(loaded: List<StashItem>) {
         val sel = _gallery.value.selected ?: return
-        val items = _gallery.value.items.filter { it.messageId in sel }
-        deleteItems(items)
+        deleteItems(loaded.filter { it.messageId in sel })
     }
 
     private fun deleteItems(items: List<StashItem>) =
@@ -667,6 +638,18 @@ class AppViewModel(
             }.onFailure { e -> _toasts.tryEmit("Delete failed: ${e.message}") }
             exitSelectionMode()
         }
+
+    private val galleryCleanup by lazy {
+        GalleryCleanup(viewModelScope, dao, { client }) { msg ->
+            _toasts.tryEmit(msg)
+        }
+    }
+
+    /** Scan Room for unloadable (size 0) rows and content-duplicate groups. */
+    suspend fun scanGalleryHealth(): GalleryHealth = galleryCleanup.scan()
+
+    /** Delete scan results (broken rows + duplicate extras), oldest kept. */
+    fun cleanGallery(health: GalleryHealth) = galleryCleanup.clean(health)
 
     private suspend fun saveToGallery(
         src: File,
@@ -692,8 +675,6 @@ class AppViewModel(
             src.inputStream().use { it.copyTo(out) }
         } ?: error("Could not open output stream")
     }
-
-    // ---------- settings / backup ----------
 
     fun setAutoBackup(
         enabled: Boolean,
@@ -727,7 +708,7 @@ class AppViewModel(
     fun setInstantUpload(enabled: Boolean) =
         viewModelScope.launch(Dispatchers.IO) {
             settings.setInstantUpload(enabled)
-            if (enabled) uploadPending()
+            if (enabled) uploadPending(auto = true)
         }
 
     private fun scheduleBackup(
@@ -752,6 +733,13 @@ class AppViewModel(
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, BACKOFF_SECONDS, TimeUnit.SECONDS)
                 .build()
         wm.enqueueUniquePeriodicWork(BackupWorker.PERIODIC, ExistingPeriodicWorkPolicy.UPDATE, req)
+        // Kick off the first constrained pass right away instead of waiting for
+        // the 6-hour schedule, so the chosen folders get backed up promptly.
+        wm.enqueueUniqueWork(
+            BackupWorker.ONE_SHOT,
+            ExistingWorkPolicy.REPLACE,
+            OneTimeWorkRequestBuilder<BackupWorker>().setConstraints(constraints).build(),
+        )
     }
 
     fun backupNow() {
@@ -766,12 +754,30 @@ class AppViewModel(
     fun logout() =
         viewModelScope.launch(Dispatchers.IO) {
             newMediaWatcher.stop()
-            client?.logout()
-            dao.clear()
-            TgClient.shutdown()
+            val c = client
+            if (c != null) {
+                runCatching { c.logout() }
+                waitForAuthDrop(c)
+                TgClient.shutdown()
+            }
             client = null
+            started = false
+            dao.clear()
             oldestLoaded = Long.MAX_VALUE
             _gallery.value = GalleryUi()
+            // Restart against the same credentials: the TDLib database is now
+            // unsigned, so the fresh client lands on the phone step.
             _auth.value = AuthUi.Loading
+            start()
         }
+
+    /** Boundedly wait until TDLib confirms the session really dropped. */
+    private suspend fun waitForAuthDrop(c: TgClient) {
+        withTimeoutOrNull(LOGOUT_TIMEOUT_MS) {
+            c.updates
+                .filterIsInstance<TdApi.UpdateAuthorizationState>()
+                .map { it.authorizationState }
+                .first { it is TdApi.AuthorizationStateWaitPhoneNumber }
+        }
+    }
 }

@@ -1,8 +1,7 @@
 package com.telestash.model
 
 import com.telestash.data.ItemEntity
-
-/** Message <-> entity <-> UI-model mappings, shared by ViewModel and BackupWorker. */
+import org.drinkless.tdlib.TdApi
 
 fun ItemEntity.toStashItem() =
     StashItem(
@@ -15,14 +14,23 @@ fun ItemEntity.toStashItem() =
         isVideo = isVideo,
         localPath = localPath,
         deviceUri = deviceUri,
+        contentHash = contentHash,
         topicId = topicId,
         phash = phash,
+        thumbFileId = thumbFileId,
+        miniJpeg = miniJpeg,
     )
 
+/**
+ * [topicId] is required because a cloud-synced message never carries it, and
+ * forgetting it was a real bug. [deviceUri]/[contentHash]/[phash] default to
+ * their "absent" values.
+ */
 fun StashItem.toEntity(
-    deviceUri: String? = this.deviceUri,
-    phash: Long = this.phash,
-    topicId: Long = this.topicId,
+    topicId: Long,
+    deviceUri: String? = null,
+    contentHash: String? = null,
+    phash: Long = 0L,
 ) = ItemEntity(
     messageId = messageId,
     chatId = chatId,
@@ -33,11 +41,14 @@ fun StashItem.toEntity(
     isVideo = isVideo,
     localPath = localPath,
     deviceUri = deviceUri,
+    contentHash = contentHash,
     phash = phash,
     topicId = topicId,
+    thumbFileId = thumbFileId,
+    miniJpeg = miniJpeg,
 )
 
 fun messageToEntity(
-    m: org.drinkless.tdlib.TdApi.Message,
+    message: TdApi.Message,
     topicId: Long = 0L,
-): ItemEntity? = StashItem.fromMessage(m)?.toEntity(topicId = topicId)
+): ItemEntity? = StashItem.fromMessage(message)?.toEntity(topicId = topicId)

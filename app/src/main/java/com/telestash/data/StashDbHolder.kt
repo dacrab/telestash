@@ -5,19 +5,23 @@ import androidx.room.Room
 
 /** Process-wide Room holder; the Worker and the UI share one database. */
 object StashDbHolder {
-    @Volatile private var db: StashDb? = null
+    private lateinit var app: Context
 
-    fun db(context: Context): StashDb =
-        db ?: synchronized(this) {
-            db ?: Room
-                .databaseBuilder(
-                    context.applicationContext,
-                    StashDb::class.java,
-                    "stash.db",
-                )
-                // v2 added phash/topicId to a cache-only db: drop & rebuild is fine
-                .fallbackToDestructiveMigration(dropAllTables = true)
-                .build()
-                .also { db = it }
-        }
+    val db: StashDb by lazy {
+        Room
+            .databaseBuilder(
+                app,
+                StashDb::class.java,
+                "stash.db",
+            )
+            // Cache-only DB: re-syncing from Telegram repopulates rows, so a rare
+            // schema bump only loses deviceUri/phash and may re-offer seen media once.
+            .fallbackToDestructiveMigration(dropAllTables = true)
+            .build()
+    }
+
+    fun db(context: Context): StashDb {
+        app = context.applicationContext
+        return db
+    }
 }

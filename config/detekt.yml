@@ -5,7 +5,7 @@ complexity:
   LongMethod:
     # Largest composables (SettingsDialog) sit around 100 lines; splitting
     # them further would hurt readability more than help.
-    threshold: 120
+    allowedLines: 120
   LongParameterList:
     # Composables legitimately take many callbacks (TopBars has 14);
     # bundling them into wrapper objects would add noise, not clarity.
