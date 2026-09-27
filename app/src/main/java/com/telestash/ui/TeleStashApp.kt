@@ -989,7 +989,7 @@ private fun UploadProgressRow(progress: UploadProgress?) {
 @Composable
 private fun SkeletonGrid(
     padding: PaddingValues,
-    modifier: Modifier = Modifier.fillMaxSize(),
+    modifier: Modifier = Modifier,
 ) {
     LazyVerticalGrid(
         columns = GridCells.Adaptive(minSize = 110.dp),

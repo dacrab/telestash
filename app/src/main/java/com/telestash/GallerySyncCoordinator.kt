@@ -393,7 +393,8 @@ internal class GallerySyncCoordinator(
                 upsertRemote(fresh.mapNotNull { messageToEntity(it, topicId = topicId) })
                 if (isTopicActive(topicId)) {
                     topicCursors[topicId] = fresh.minOf { it.id }
-                    gallery.update { it.copy(hasMore = fresh.isNotEmpty()) }
+                    // A non-empty page always leaves an older cursor to resume from.
+                    gallery.update { it.copy(hasMore = true) }
                 }
             } catch (_: TimeoutCancellationException) {
                 if (isTopicActive(topicId)) {

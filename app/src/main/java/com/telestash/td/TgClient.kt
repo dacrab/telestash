@@ -87,14 +87,6 @@ class TgClient private constructor(
 
         fun peek(): TgClient? = instance
 
-        fun shutdown() {
-            instance?.let { c ->
-                runCatching { c.native.send(TdApi.Close(), null, null) }
-                c.scope.cancel()
-            }
-            instance = null
-        }
-
         suspend fun shutdownAndWait() {
             val c = instance ?: return
             try {
