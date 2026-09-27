@@ -23,40 +23,45 @@ jobs:
           java-version: 21
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
-      - name: Decode signing keystore
-        # Only write the keystore when the secret exists; otherwise leave the
-        # file absent so the build falls back to debug signing instead of
-        # attempting to sign with a corrupt (empty) keystore.
+      - name: Validate signing secrets and decode keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        if: ${{ env.KEYSTORE_BASE64 != '' }}
-        run: echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/release.keystore"
-
-      - name: Build release APK
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          if [ -f "$GITHUB_WORKSPACE/release.keystore" ]; then
-            export KEYSTORE_FILE="$GITHUB_WORKSPACE/release.keystore"
-            export KEYSTORE_PASSWORD="${{ secrets.KEYSTORE_PASSWORD }}"
-            export KEY_ALIAS="${{ secrets.KEY_ALIAS }}"
-            export KEY_PASSWORD="${{ secrets.KEY_PASSWORD }}"
-          fi
-          ./gradlew ktlintCheck detekt lintRelease assembleRelease
+          set -euo pipefail
+          [[ -n "$KEYSTORE_BASE64" ]] || { printf '%s\n' '::error::KEYSTORE_BASE64 is required'; exit 1; }
+          [[ -n "$KEYSTORE_PASSWORD" ]] || { printf '%s\n' '::error::KEYSTORE_PASSWORD is required'; exit 1; }
+          [[ -n "$KEY_ALIAS" ]] || { printf '%s\n' '::error::KEY_ALIAS is required'; exit 1; }
+          [[ -n "$KEY_PASSWORD" ]] || { printf '%s\n' '::error::KEY_PASSWORD is required'; exit 1; }
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          [[ -s "$RUNNER_TEMP/release.keystore" ]] || { printf '%s\n' '::error::The decoded keystore is empty'; exit 1; }
 
-      - name: Rename APK with version
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          mv app/build/outputs/apk/release/app-release.apk "telestash-${VERSION}.apk"
+      - name: Lint and build release APK
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./gradlew ktlintCheck detekt lintRelease test assembleRelease -PreleaseTag="$RELEASE_TAG" -PsignRelease=true
+
+      - name: Rename APK
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: mv app/build/outputs/apk/release/app-release.apk "telestash-${RELEASE_TAG#v}.apk"
 
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: telestash-*.apk
           generate_release_notes: true
-          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
           body: |
             ## Installation
 
             Download the APK and install it on your Android phone
             (enable "install from unknown sources" if asked).
 
-            > APKs are signed with the CI key unless release secrets are configured.
+            > This APK is signed with the project release key.
             > Verify you trust the source before installing.

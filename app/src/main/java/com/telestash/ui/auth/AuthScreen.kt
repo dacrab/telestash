@@ -1,6 +1,5 @@
 package com.telestash.ui.auth
 
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -35,6 +34,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -46,7 +49,6 @@ import com.telestash.AuthUi
 import kotlinx.coroutines.delay
 
 private const val MIN_PHONE_DIGITS = 8
-private const val AUTO_SUBMIT_MIN_DIGITS = 6
 private const val RESEND_COOLDOWN_SECONDS = 60L
 
 /** One second between countdown ticks. */
@@ -58,9 +60,9 @@ fun AuthScreen(
     vm: AppViewModel,
     state: AuthUi,
 ) {
-    val busy by vm.authBusyPublic.collectAsStateWithLifecycle()
+    val busy by vm.authBusy.collectAsStateWithLifecycle()
     val error by vm.authError.collectAsStateWithLifecycle()
-    // Phone is hoisted so "change number" returns to a filled field.
+    // Keep the phone value while navigating between auth steps.
     var phone by remember { mutableStateOf("") }
     val cleanPhone = phone.trim().filterIndexed { i, ch -> ch.isDigit() || (ch == '+' && i == 0) }
 
@@ -83,7 +85,11 @@ fun AuthScreen(
             Spacer(Modifier.height(48.dp))
         }
 
-        Text("TeleStash", style = MaterialTheme.typography.displaySmall)
+        Text(
+            "TeleStash",
+            style = MaterialTheme.typography.displaySmall,
+            modifier = Modifier.semantics { heading() },
+        )
         Spacer(Modifier.height(4.dp))
         Text(
             "Unlimited photo storage in your Telegram",
@@ -114,7 +120,10 @@ private fun ErrorText(error: String?) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.error,
             textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth(),
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .semantics { liveRegion = LiveRegionMode.Polite },
         )
     }
 }
@@ -133,6 +142,7 @@ private fun PhoneStep(
         onValueChange = { onPhoneChanged(it.trim().filterIndexed { i, ch -> ch.isDigit() || (ch == '+' && i == 0) }) },
         label = { Text("Phone number") },
         placeholder = { Text("+15551234567") },
+        isError = error != null,
         keyboardOptions =
             KeyboardOptions(
                 keyboardType = KeyboardType.Phone,
@@ -185,38 +195,29 @@ private fun CodeStep(
     val digits = code.filter { ch -> ch.isDigit() }
     var resendIn by remember { mutableLongStateOf(0L) }
 
-    // Tick the "resend" countdown down once a second.
-    LaunchedEffect(resendIn) {
-        while (resendIn > 0) {
+    LaunchedEffect(Unit) {
+        while (true) {
             delay(RESEND_TICK_MS)
-            resendIn--
+            if (resendIn > 0) resendIn--
         }
     }
 
-    Box(Modifier.fillMaxWidth()) {
-        TextButton(
-            onClick = { vm.backToAuthStep() },
-            modifier = Modifier.align(Alignment.CenterEnd),
-        ) {
-            Text("Change number")
-        }
-        Surface(
-            shape = MaterialTheme.shapes.medium,
-            color = MaterialTheme.colorScheme.primaryContainer,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                Text(
-                    "Code sent to ${if (phone.isBlank()) "your device" else phone}",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                )
-                Text(
-                    hint,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                )
-            }
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.primaryContainer,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Text(
+                "Code sent to ${if (phone.isBlank()) "your device" else phone}",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+            Text(
+                hint,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
         }
     }
     Spacer(Modifier.height(16.dp))
@@ -224,13 +225,9 @@ private fun CodeStep(
         value = code,
         onValueChange = { new ->
             code = new.filter { ch -> ch.isDigit() }
-            // Auto-submit only when a full code lands at once (paste),
-            // not while the user is still typing shorter codes.
-            if (!busy && new.length >= AUTO_SUBMIT_MIN_DIGITS && code.length >= AUTO_SUBMIT_MIN_DIGITS) {
-                vm.submitCode(code)
-            }
         },
         label = { Text("Login code") },
+        isError = error != null,
         keyboardOptions =
             KeyboardOptions(
                 keyboardType = KeyboardType.Number,
@@ -297,6 +294,7 @@ private fun PasswordStep(
         value = pw,
         onValueChange = { pw = it },
         label = { Text("Cloud password") },
+        isError = error != null,
         visualTransformation = PasswordVisualTransformation(),
         keyboardOptions =
             KeyboardOptions(
@@ -336,6 +334,7 @@ private fun RegistrationStep(
         value = name,
         onValueChange = { name = it },
         label = { Text("Your name") },
+        isError = error != null,
         singleLine = true,
         enabled = !busy,
         modifier = Modifier.fillMaxWidth(),

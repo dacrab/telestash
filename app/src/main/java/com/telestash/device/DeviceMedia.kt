@@ -79,8 +79,8 @@ object DeviceMedia {
 
     /** Folders containing at least one visible image or video, busiest first. */
     fun folders(context: Context): List<DeviceFolder> {
-        val photos = bucketCounts(context, imageCollection(), isVideo = false)
-        val videos = bucketCounts(context, videoCollection(), isVideo = true)
+        val photos = safeBucketCounts(context, imageCollection(), isVideo = false)
+        val videos = safeBucketCounts(context, videoCollection(), isVideo = true)
         return (photos.keys + videos.keys)
             .filter { it.isNotBlank() }
             .map { DeviceFolder(it, photos[it] ?: 0, videos[it] ?: 0) }
@@ -99,12 +99,26 @@ object DeviceMedia {
         val out = mutableListOf<PendingMedia>()
         for (isVideo in listOf(false, true)) {
             val collection = if (isVideo) videoCollection() else imageCollection()
-            forEachVisible(context, collection, isVideo) { item ->
-                if (allowedFolders.isEmpty() || item.bucket in allowedFolders) out.add(item)
+            try {
+                forEachVisible(context, collection, isVideo) { item ->
+                    if (allowedFolders.isEmpty() || item.bucket in allowedFolders) out.add(item)
+                }
+            } catch (_: SecurityException) {
             }
         }
         return out.filter { it.uri.toString() !in knownUris }
     }
+
+    private fun safeBucketCounts(
+        context: Context,
+        collection: Uri,
+        isVideo: Boolean,
+    ): Map<String, Int> =
+        try {
+            bucketCounts(context, collection, isVideo)
+        } catch (_: SecurityException) {
+            emptyMap()
+        }
 
     private fun bucketCounts(
         context: Context,

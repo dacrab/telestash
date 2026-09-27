@@ -8,5 +8,5 @@ gradlew text eol=lf
 # The TDLib fat-AAR is binary; keep git from interfering with it.
 *.aar binary
 
-# Generated/synth files don't belong in diffs.
+# Keep generated logs out of diffs.
 *.log text eol=lf

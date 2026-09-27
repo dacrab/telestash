@@ -8,6 +8,7 @@ import com.telestash.backup.BackupEngine
 import com.telestash.data.SettingsRepository
 import com.telestash.data.StashDbHolder
 import com.telestash.td.TgClient
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -42,12 +43,8 @@ class NewMediaWatcher(
         val o =
             object : ContentObserver(handler) {
                 override fun onChange(selfChange: Boolean) {
-                    debounceJob?.cancel()
-                    debounceJob =
-                        scope.launch(Dispatchers.Default) {
-                            delay(DEBOUNCE_MS)
-                            runCatching { notifyPending() }
-                        }
+                    if (observer !== this) return
+                    launchScan(DEBOUNCE_MS)
                 }
             }
         observer = o
@@ -61,13 +58,33 @@ class NewMediaWatcher(
             true,
             o,
         )
+        launchScan()
     }
 
     fun stop() {
-        observer?.let { context.contentResolver.unregisterContentObserver(it) }
+        val current = observer
         observer = null
         debounceJob?.cancel()
         debounceJob = null
+        current?.let { context.contentResolver.unregisterContentObserver(it) }
+    }
+
+    private fun launchScan(delayMs: Long? = null) {
+        debounceJob?.cancel()
+        debounceJob =
+            scope.launch(Dispatchers.Default) {
+                delayMs?.let { delay(it) }
+                scanPending()
+            }
+    }
+
+    private suspend fun scanPending() {
+        try {
+            notifyPending()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+        }
     }
 
     private suspend fun notifyPending() {
@@ -75,8 +92,6 @@ class NewMediaWatcher(
         val dao = StashDbHolder.db(context).itemDao()
         val settings = SettingsRepository(context)
         val pending = BackupEngine.pending(context, dao, settings.backupFolders.first())
-        if (pending.isNotEmpty()) {
-            onNewMedia(pending, settings.instantUpload.first())
-        }
+        onNewMedia(pending, settings.instantUpload.first())
     }
 }

@@ -15,15 +15,15 @@ import androidx.compose.ui.graphics.Color
 
 private val LightColors =
     lightColorScheme(
-        primary = Color(0xFF2AABEE),
+        primary = Color(0xFF006493),
         onPrimary = Color(0xFFFFFFFF),
         primaryContainer = Color(0xFFC8E9FF),
         onPrimaryContainer = Color(0xFF003352),
-        secondary = Color(0xFF0088CC),
+        secondary = Color(0xFF0077B5),
         onSecondary = Color.White,
         secondaryContainer = Color(0xFFD1E4FF),
         onSecondaryContainer = Color(0xFF004B72),
-        tertiary = Color(0xFF3B7F6E),
+        tertiary = Color(0xFF2F6355),
         onTertiary = Color.White,
         error = Color(0xFFB3261E),
         onError = Color.White,

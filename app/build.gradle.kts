@@ -11,12 +11,8 @@ detekt {
     buildUponDefaultConfig = true
 }
 
-ktlint {
-    // Kotlin 2.2 scripts trip the old ktlint parser bundled with the plugin;
-    // source files are still fully checked.
-    filter {
-        exclude { it.file.extension == "kts" }
-    }
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 kotlin {
@@ -32,10 +28,38 @@ tasks.withType(dev.detekt.gradle.Detekt::class.java).configureEach {
     jvmTarget.set("17")
 }
 
-// Release signing keystore provided by CI env; null locally.
-val ciKeystoreFile: String? = providers.environmentVariable("KEYSTORE_FILE").orNull
-
 val appVersion = "0.3.0"
+val releaseTag = providers.gradleProperty("releaseTag").orNull
+val signRelease = providers.gradleProperty("signRelease").orNull == "true"
+
+if (releaseTag != null) {
+    require(signRelease) { "Tagged release builds require signRelease=true" }
+    require(Regex("""v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?""").matches(releaseTag)) {
+        "Release tag must be a semantic version"
+    }
+}
+if (signRelease) {
+    require(releaseTag != null) { "signRelease=true requires releaseTag" }
+}
+val releaseVersion = releaseTag?.removePrefix("v") ?: appVersion
+val releaseVersionCode =
+    releaseTag?.let {
+        val parts = releaseVersion.substringBefore('-').split('.').map(String::toInt)
+        require(parts.size == 3 && parts.all { part -> part in 0..999 })
+        parts.fold(0) { code, part -> code * 1000 + part }
+    } ?: 3
+
+val keystoreFile = providers.environmentVariable("KEYSTORE_FILE").orNull
+val keystorePassword = providers.environmentVariable("KEYSTORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("KEY_PASSWORD").orNull
+
+if (signRelease) {
+    require(!keystoreFile.isNullOrBlank()) { "KEYSTORE_FILE is required when signing a release" }
+    require(!keystorePassword.isNullOrBlank()) { "KEYSTORE_PASSWORD is required when signing a release" }
+    require(!releaseKeyAlias.isNullOrBlank()) { "KEY_ALIAS is required when signing a release" }
+    require(!releaseKeyPassword.isNullOrBlank()) { "KEY_PASSWORD is required when signing a release" }
+}
 
 android {
     namespace = "com.telestash"
@@ -45,18 +69,20 @@ android {
         applicationId = "com.telestash"
         minSdk = 26
         targetSdk = 37
-        versionCode = 3
-        versionName = appVersion
+        versionCode = releaseVersionCode
+        versionName = releaseVersion
         // TDLib reports this on log-in; keep it in sync with versionName.
-        buildConfigField("String", "APP_VERSION", "\"$appVersion\"")
+        buildConfigField("String", "APP_VERSION", "\"$releaseVersion\"")
     }
 
     signingConfigs {
-        create("release") {
-            ciKeystoreFile?.let { storeFile = file(it) }
-            storePassword = providers.environmentVariable("KEYSTORE_PASSWORD").orNull
-            keyAlias = providers.environmentVariable("KEY_ALIAS").orNull
-            keyPassword = providers.environmentVariable("KEY_PASSWORD").orNull
+        if (signRelease) {
+            create("release") {
+                storeFile = file(checkNotNull(keystoreFile))
+                storePassword = checkNotNull(keystorePassword)
+                keyAlias = checkNotNull(releaseKeyAlias)
+                keyPassword = checkNotNull(releaseKeyPassword)
+            }
         }
     }
 
@@ -68,13 +94,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // Without CI signing secrets the APK is debug-signed so it stays installable.
-            signingConfig =
-                if (ciKeystoreFile != null) {
-                    signingConfigs.getByName("release")
-                } else {
-                    signingConfigs.getByName("debug")
-                }
+            if (signRelease) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     compileOptions {
@@ -109,4 +131,5 @@ dependencies {
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.ui)
     implementation(libs.zoomable)
+    testImplementation(libs.junit)
 }

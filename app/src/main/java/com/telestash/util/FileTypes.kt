@@ -21,4 +21,17 @@ object FileTypes {
             else -> "image/jpeg"
         }
     }
+
+    fun videoMime(name: String): String {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return when (ext) {
+            "mov" -> "video/quicktime"
+            "mkv" -> "video/x-matroska"
+            "avi" -> "video/x-msvideo"
+            "webm" -> "video/webm"
+            "3gp" -> "video/3gpp"
+            "m4v" -> "video/x-m4v"
+            else -> "video/mp4"
+        }
+    }
 }

@@ -3,8 +3,10 @@ package com.telestash.td
 import android.content.Context
 import com.telestash.BuildConfig
 import com.telestash.data.DbKeyStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -16,6 +18,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
@@ -47,6 +51,7 @@ class TgClient private constructor(
     private val dbKey: ByteArray,
 ) {
     companion object {
+        const val ALBUM_CAPTION_PREFIX = "telestash-album:"
         private const val TOPICS_COLLECTION_TIMEOUT_MS = 3_000L
         private const val TOPICS_QUIET_PERIOD_MS = 250L
         private const val TOPICS_PAGE_LIMIT = 100
@@ -59,6 +64,10 @@ class TgClient private constructor(
          * acknowledge the bytes before a pass gives up and marks the item failed.
          */
         private const val SEND_CONFIRM_TIMEOUT_MS = 30L * 60 * 1000
+        private const val FORWARD_MESSAGE_LIMIT = 100
+        private const val CLOSE_TIMEOUT_MS = 5_000L
+        private const val HISTORY_RETRY_LIMIT = 3
+        private const val HISTORY_RETRY_BASE_DELAY_MS = 500L
 
         @Volatile private var instance: TgClient? = null
 
@@ -85,9 +94,23 @@ class TgClient private constructor(
             }
             instance = null
         }
+
+        suspend fun shutdownAndWait() {
+            val c = instance ?: return
+            try {
+                runCatching { c.native.send(TdApi.Close(), null, null) }
+                withTimeoutOrNull(CLOSE_TIMEOUT_MS) { c.authorizationClosed.await() }
+            } finally {
+                c.scope.cancel()
+                synchronized(this) {
+                    if (instance === c) instance = null
+                }
+            }
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val authorizationClosed = CompletableDeferred<Unit>()
 
     private val _updates =
         MutableSharedFlow<TdApi.Update>(
@@ -107,6 +130,7 @@ class TgClient private constructor(
     private val startAttempted = AtomicBoolean(false)
 
     private var cachedChatId = 0L
+    private val sendMutex = Mutex()
 
     internal val native: Client =
         Client.create(
@@ -124,8 +148,9 @@ class TgClient private constructor(
             updates
                 .filterIsInstance<TdApi.UpdateAuthorizationState>()
                 .collect { u ->
-                    if (u.authorizationState is TdApi.AuthorizationStateReady) {
-                        isAuthorized = true
+                    isAuthorized = u.authorizationState is TdApi.AuthorizationStateReady
+                    if (u.authorizationState is TdApi.AuthorizationStateClosed) {
+                        authorizationClosed.complete(Unit)
                     }
                 }
         }
@@ -154,11 +179,15 @@ class TgClient private constructor(
      */
     suspend fun start() {
         if (!startAttempted.compareAndSet(false, true)) return
-        runCatching { send(tdlibParameters()) }
-            .onFailure { e ->
-                startAttempted.set(false)
-                throw e
-            }
+        try {
+            send(tdlibParameters())
+        } catch (e: CancellationException) {
+            startAttempted.set(false)
+            throw e
+        } catch (e: Exception) {
+            startAttempted.set(false)
+            throw e
+        }
     }
 
     private fun tdlibParameters(): TdApi.SetTdlibParameters {
@@ -208,17 +237,24 @@ class TgClient private constructor(
     suspend fun registerUser(firstName: String) = send(TdApi.RegisterUser(firstName, "", false))
 
     suspend fun logout() {
+        send(TdApi.LogOut())
         cachedChatId = 0L
-        runCatching { send(TdApi.LogOut()) }
+        isAuthorized = false
     }
 
-    /** Saved Messages chat id, resolved once via my_id -> createPrivateChat(force). */
+    suspend fun refreshAuthorizationState(): TdApi.AuthorizationState {
+        val state = send(TdApi.GetAuthorizationState())
+        isAuthorized = state is TdApi.AuthorizationStateReady
+        return state
+    }
+
+    suspend fun currentUserId(): Long =
+        (send(TdApi.GetOption("my_id")) as? TdApi.OptionValueInteger)?.value
+            ?: throw TdException("my_id option is unavailable")
+
     suspend fun savedMessagesChatId(): Long {
         if (cachedChatId != 0L) return cachedChatId
-        val option =
-            send(TdApi.GetOption("my_id")) as? TdApi.OptionValueInteger
-                ?: throw TdException("my_id option is unavailable")
-        cachedChatId = send(TdApi.CreatePrivateChat(option.value, true)).id
+        cachedChatId = send(TdApi.CreatePrivateChat(currentUserId(), true)).id
         return cachedChatId
     }
 
@@ -229,20 +265,26 @@ class TgClient private constructor(
      */
     suspend fun createAlbumTopic(albumName: String): Long {
         val topicId = System.currentTimeMillis()
-        send(
-            TdApi.SendMessage(
-                savedMessagesChatId(),
-                TdApi.MessageTopicSavedMessages(topicId),
-                null,
-                null,
-                null,
-                TdApi.InputMessageText(
-                    TdApi.FormattedText("telestash-album:$albumName", arrayOf()),
-                    null,
-                    false,
-                ),
-            ),
-        )
+        sendMutex.withLock {
+            withSendOutcomeCollector { collector ->
+                val sent =
+                    send(
+                        TdApi.SendMessage(
+                            savedMessagesChatId(),
+                            TdApi.MessageTopicSavedMessages(topicId),
+                            null,
+                            null,
+                            null,
+                            TdApi.InputMessageText(
+                                TdApi.FormattedText("$ALBUM_CAPTION_PREFIX$albumName", arrayOf()),
+                                null,
+                                false,
+                            ),
+                        ),
+                    )
+                collector.await(sent.id)
+            }
+        }
         return topicId
     }
 
@@ -260,7 +302,12 @@ class TgClient private constructor(
                         lastArrival.set(System.currentTimeMillis())
                     }
             }
-            runCatching { send(TdApi.LoadSavedMessagesTopics(TOPICS_PAGE_LIMIT)) }
+            try {
+                send(TdApi.LoadSavedMessagesTopics(TOPICS_PAGE_LIMIT))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
             // Wait until topic updates stop arriving for a short quiet period
             // (or the overall timeout hits), instead of a fixed one-second wait.
             withTimeoutOrNull(TOPICS_COLLECTION_TIMEOUT_MS) {
@@ -281,113 +328,221 @@ class TgClient private constructor(
         }
     }
 
-    /** Upload a file losslessly as document, optionally into an album topic. */
     suspend fun uploadDocument(
         path: String,
         fileName: String,
         topicId: Long = 0L,
-    ): TdApi.Message {
-        val topic = if (topicId > 0) TdApi.MessageTopicSavedMessages(topicId) else null
-        val sent =
-            send(
-                TdApi.SendMessage(
-                    savedMessagesChatId(),
-                    topic,
-                    null,
-                    null,
-                    null,
-                    TdApi.InputMessageDocument(
-                        TdApi.InputDocument(TdApi.InputFileLocal(path), null, false),
-                        TdApi.FormattedText("telestash:$fileName", arrayOf()),
-                    ),
-                ),
-            )
-        return confirmSent(sent.id)
+    ): TdApi.Message =
+        sendMutex.withLock {
+            val topic = if (topicId > 0) TdApi.MessageTopicSavedMessages(topicId) else null
+            withSendOutcomeCollector { collector ->
+                val sent =
+                    send(
+                        TdApi.SendMessage(
+                            savedMessagesChatId(),
+                            topic,
+                            null,
+                            null,
+                            null,
+                            TdApi.InputMessageDocument(
+                                TdApi.InputDocument(TdApi.InputFileLocal(path), null, false),
+                                TdApi.FormattedText("telestash:$fileName", arrayOf()),
+                            ),
+                        ),
+                    )
+                collector.await(sent.id)
+            }
+        }
+
+    private sealed interface SendEvent {
+        data class Update(
+            val value: TdApi.Update,
+        ) : SendEvent
+
+        data class Deleted(
+            val messageId: Long,
+        ) : SendEvent
     }
 
-    /**
-     * SendMessage returns the local placeholder as soon as the file is queued,
-     * not when the server holds the bytes. Waiting for the send result means a
-     * caller only records an item once Telegram actually has it — a process
-     * death mid-upload then leaves the item pending instead of silently "done".
-     */
-    private suspend fun confirmSent(messageId: Long): TdApi.Message {
-        val events = Channel<TdApi.Update>(Channel.BUFFERED)
-        val collector =
-            scope.launch {
-                updates.collect { u ->
-                    if (u is TdApi.UpdateMessageSendSucceeded || u is TdApi.UpdateMessageSendFailed) {
-                        events.trySend(u)
+    private inner class SendOutcomeCollector {
+        private val events = Channel<SendEvent>(Channel.UNLIMITED)
+        private val buffered = mutableMapOf<Long, SendEvent>()
+        private val collector =
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                updates.collect { update ->
+                    when (update) {
+                        is TdApi.UpdateMessageSendSucceeded,
+                        is TdApi.UpdateMessageSendFailed,
+                        -> events.trySend(SendEvent.Update(update))
+                        is TdApi.UpdateDeleteMessages ->
+                            update.messageIds.forEach { id -> events.trySend(SendEvent.Deleted(id)) }
+                        else -> Unit
                     }
                 }
             }
-        try {
+
+        init {
+            collector.invokeOnCompletion { cause -> events.close(cause) }
+        }
+
+        suspend fun await(messageId: Long): TdApi.Message {
             val outcome =
                 withTimeoutOrNull(SEND_CONFIRM_TIMEOUT_MS) {
-                    var found: TdApi.Update? = null
-                    while (found == null) {
-                        val u = events.receive()
-                        val isOurs =
-                            when (u) {
-                                is TdApi.UpdateMessageSendSucceeded -> u.message.id == messageId
-                                is TdApi.UpdateMessageSendFailed -> u.message.id == messageId
-                                else -> false
-                            }
-                        if (isOurs) found = u
+                    buffered.remove(messageId) ?: receiveOutcome(messageId)
+                } ?: throw TdException("SEND_TIMEOUT")
+            return confirmedMessage(outcome)
+        }
+
+        private fun confirmedMessage(outcome: SendEvent): TdApi.Message =
+            when (outcome) {
+                is SendEvent.Update -> {
+                    val update = outcome.value
+                    when (update) {
+                        is TdApi.UpdateMessageSendSucceeded -> update.message
+                        is TdApi.UpdateMessageSendFailed ->
+                            throw TdException(update.error.message)
+                        else -> error("unreachable")
                     }
-                    found
-                } ?: throw TdException("UPLOAD_TIMEOUT")
-            return when (outcome) {
-                is TdApi.UpdateMessageSendSucceeded -> outcome.message
-                is TdApi.UpdateMessageSendFailed ->
-                    throw TdException("upload rejected: ${outcome.error.message}")
-                else -> error("unreachable")
+                }
+                is SendEvent.Deleted -> throw TdException("send was deleted before completion")
             }
-        } finally {
+
+        private suspend fun receiveOutcome(messageId: Long): SendEvent {
+            while (true) {
+                val event = events.receive()
+                val eventId = eventId(event) ?: continue
+                if (eventId == messageId) return event
+                buffered[eventId] = event
+            }
+        }
+
+        private fun eventId(event: SendEvent): Long? =
+            when (event) {
+                is SendEvent.Deleted -> event.messageId
+                is SendEvent.Update -> {
+                    when (val update = event.value) {
+                        is TdApi.UpdateMessageSendSucceeded ->
+                            update.oldMessageId.takeIf { it != 0L } ?: update.message.id
+                        is TdApi.UpdateMessageSendFailed ->
+                            update.oldMessageId.takeIf { it != 0L } ?: update.message.id
+                        else -> null
+                    }
+                }
+            }
+
+        fun close() {
+            buffered.clear()
             collector.cancel()
+            events.cancel()
         }
     }
 
-    /** Move messages into an album topic: forward as copies, then delete originals. */
+    private suspend fun <T> withSendOutcomeCollector(block: suspend (SendOutcomeCollector) -> T): T {
+        val collector = SendOutcomeCollector()
+        return try {
+            block(collector)
+        } finally {
+            collector.close()
+        }
+    }
+
     suspend fun moveToTopic(
         messageIds: LongArray,
         topicId: Long,
     ): List<TdApi.Message> {
-        val chatId = savedMessagesChatId()
-        val sendCopy = true
-        val removeCaption = false
-        val res =
-            send(
-                TdApi.ForwardMessages(
-                    chatId,
-                    TdApi.MessageTopicSavedMessages(topicId),
-                    chatId,
-                    messageIds,
-                    null,
-                    sendCopy,
-                    removeCaption,
-                ),
-            )
-        send(TdApi.DeleteMessages(chatId, messageIds, true))
-        return res.messages.toList()
+        if (messageIds.isEmpty()) return emptyList()
+        val sortedIds = messageIds.sorted()
+        return sendMutex.withLock {
+            val chatId = savedMessagesChatId()
+            val forwarded = mutableListOf<TdApi.Message>()
+            sortedIds.chunked(FORWARD_MESSAGE_LIMIT).forEach { chunk ->
+                val returned =
+                    withSendOutcomeCollector { collector ->
+                        val response =
+                            send(
+                                TdApi.ForwardMessages(
+                                    chatId,
+                                    TdApi.MessageTopicSavedMessages(topicId),
+                                    chatId,
+                                    chunk.toLongArray(),
+                                    null,
+                                    true,
+                                    false,
+                                ),
+                            )
+                        val messages = response.messages.filterNotNull()
+                        if (messages.size != chunk.size) {
+                            throw TdException("forward returned ${messages.size} of ${chunk.size} message(s)")
+                        }
+                        messages.map { collector.await(it.id) }
+                    }
+                forwarded += returned
+            }
+            send(TdApi.DeleteMessages(chatId, sortedIds.toLongArray(), true))
+            forwarded
+        }
     }
 
     /** Newest-first history page of Saved Messages. */
     suspend fun history(
         fromMessageId: Long,
         limit: Int,
-    ): TdApi.Messages = send(TdApi.GetChatHistory(savedMessagesChatId(), fromMessageId, 0, limit, false))
+    ): TdApi.Messages =
+        retryAbortedRequest {
+            send(TdApi.GetChatHistory(savedMessagesChatId(), fromMessageId, 0, limit, false))
+        }
 
     /** Newest-first history page of a Saved Messages topic (album). */
     suspend fun topicHistory(
         topicId: Long,
         fromMessageId: Long,
         limit: Int,
-    ): TdApi.Messages = send(TdApi.GetSavedMessagesTopicHistory(topicId, fromMessageId, 0, limit))
+    ): TdApi.Messages =
+        retryAbortedRequest {
+            send(TdApi.GetSavedMessagesTopicHistory(topicId, fromMessageId, 0, limit))
+        }
+
+    private suspend fun <T> retryAbortedRequest(block: suspend () -> T): T {
+        var attempt = 0
+        while (true) {
+            try {
+                return block()
+            } catch (e: TdException) {
+                val aborted = e.message.orEmpty().contains("request aborted", ignoreCase = true)
+                if (!aborted || attempt >= HISTORY_RETRY_LIMIT) throw e
+                attempt++
+                delay(HISTORY_RETRY_BASE_DELAY_MS * attempt)
+            }
+        }
+    }
+
+    suspend fun resolveRemoteFile(
+        remoteFileId: String,
+        type: TdApi.FileType,
+    ): TdApi.File = send(TdApi.GetRemoteFile(remoteFileId, type))
+
+    suspend fun messageExists(
+        chatId: Long,
+        messageId: Long,
+    ): Boolean =
+        try {
+            send(TdApi.GetMessage(chatId, messageId))
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: TdException) {
+            if (e.isFloodWait) throw e
+            false
+        }
 
     /** Download a file synchronously (priority 16); returns the local path. */
-    suspend fun download(fileId: Int): String =
-        send(TdApi.DownloadFile(fileId, DOWNLOAD_PRIORITY, 0, 0, true)).local.path
+    suspend fun download(fileId: Int): String {
+        val local = send(TdApi.DownloadFile(fileId, DOWNLOAD_PRIORITY, 0, 0, true)).local
+        if (!local.isDownloadingCompleted || local.path.isBlank() || !File(local.path).exists()) {
+            throw TdException("download did not complete")
+        }
+        return local.path
+    }
 
     suspend fun deleteMessages(
         chatId: Long,

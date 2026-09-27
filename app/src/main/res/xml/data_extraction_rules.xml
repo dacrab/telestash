@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Nothing is backed up or transferred: TDLib state, credentials and the
-     encrypted cache are device-local by design. -->
+<!-- Nothing is backed up or transferred: credentials and local app data stay on-device. -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="root" path="." />

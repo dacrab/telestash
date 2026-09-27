@@ -8,9 +8,6 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,7 +16,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -34,21 +30,25 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoAlbum
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
@@ -68,10 +68,8 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -79,10 +77,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -103,8 +105,6 @@ import com.telestash.ui.gallery.GalleryCell
 import com.telestash.ui.gallery.PhotoViewerDialog
 import com.telestash.ui.gallery.TimelineRow
 import com.telestash.ui.settings.SettingsScreen
-import com.telestash.util.Format
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /** How many placeholder cells to show during first sync. */
@@ -116,6 +116,21 @@ private val TabPillShape = RoundedCornerShape(50)
 /** Scale used to render a fraction as a whole-number percentage. */
 private const val PERCENT = 100
 
+private sealed interface PendingDelete {
+    val count: Int
+
+    data class Viewer(
+        val item: StashItem,
+    ) : PendingDelete {
+        override val count: Int = 1
+    }
+
+    data class Selection(
+        override val count: Int,
+    ) : PendingDelete
+}
+
+@Suppress("CyclomaticComplexMethod")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TeleStashApp(
@@ -125,15 +140,13 @@ fun TeleStashApp(
     val gallery by vm.gallery.collectAsStateWithLifecycle()
     val uploadProgress by vm.uploadProgress.collectAsStateWithLifecycle()
     val selectedTab by vm.selectedTab.collectAsStateWithLifecycle()
-    val albumCounts by vm.albumCounts.collectAsStateWithLifecycle(initialValue = emptyList())
+    val albumCounts by vm.albumCounts.collectAsStateWithLifecycle(initialValue = null)
     val photos = vm.galleryPaging.collectAsLazyPagingItems()
     val snackbar = remember { SnackbarHostState() }
     var viewer by remember { mutableStateOf<StashItem?>(null) }
     var showNewAlbum by remember { mutableStateOf(false) }
     var showAddToAlbum by remember { mutableStateOf(false) }
-    var confirmDelete by remember { mutableStateOf<Int?>(null) }
-    // The viewer item the delete dialog refers to (the swiped-to photo).
-    var deleteTarget by remember { mutableStateOf<StashItem?>(null) }
+    var pendingDelete by remember { mutableStateOf<PendingDelete?>(null) }
     var confirmLogout by remember { mutableStateOf(false) }
     val openTopicId = gallery.openTopicId
     val isReady = authState.value is AuthUi.Ready
@@ -143,10 +156,12 @@ fun TeleStashApp(
     }
 
     val selecting = gallery.selected != null
-    val inAlbum = openTopicId != 0L
+    val inAlbum = selectedTab == AppViewModel.TAB_ALBUMS && openTopicId != 0L
+    val baseFabVisible = isReady && !selecting && selectedTab != AppViewModel.TAB_SETTINGS
+    val showFab = baseFabVisible && (selectedTab != AppViewModel.TAB_ALBUMS || inAlbum)
 
     // System back: leave selection/album/settings before exiting the app.
-    BackHandler(enabled = selecting || inAlbum || selectedTab == AppViewModel.TAB_SETTINGS) {
+    BackHandler(enabled = isReady && (selecting || inAlbum || selectedTab == AppViewModel.TAB_SETTINGS)) {
         when {
             selecting -> vm.exitSelectionMode()
             inAlbum -> vm.closeTopic()
@@ -157,22 +172,28 @@ fun TeleStashApp(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
-            TopBars(
-                selectedTab = selectedTab,
-                selecting = selecting,
-                selectedCount = gallery.selected?.size ?: 0,
-                inAlbum = inAlbum,
-                albumName = gallery.albums.find { it.topicId == openTopicId }?.name,
-                onCancelSelection = { vm.exitSelectionMode() },
-                onSelectAll = { vm.selectAll(snapshotPhotos(photos)) },
-                onAddToAlbum = { showAddToAlbum = true },
-                onDownloadSelected = { vm.downloadSelected(snapshotPhotos(photos)) },
-                onDeleteSelected = { confirmDelete = gallery.selected?.size ?: 0 },
-                onBack = { vm.closeTopic() },
-            )
+            if (isReady) {
+                TopBars(
+                    selectedTab = selectedTab,
+                    selecting = selecting,
+                    selectedCount = gallery.selected?.size ?: 0,
+                    inAlbum = inAlbum,
+                    albumName = gallery.albums.find { it.topicId == openTopicId }?.name,
+                    onCancelSelection = { vm.exitSelectionMode() },
+                    onSelectAll = { vm.selectAll(snapshotPhotos(photos)) },
+                    onAddToAlbum = { showAddToAlbum = true },
+                    onDownloadSelected = vm::downloadSelected,
+                    onDeleteSelected = {
+                        pendingDelete = PendingDelete.Selection(gallery.selected?.size ?: 0)
+                    },
+                    onBack = { vm.closeTopic() },
+                    onSettings = { vm.selectTab(AppViewModel.TAB_SETTINGS) },
+                    onNewAlbum = { showNewAlbum = true },
+                )
+            }
         },
         bottomBar = {
-            if (isReady && !selecting) {
+            if (isReady && !selecting && selectedTab != AppViewModel.TAB_SETTINGS) {
                 BottomNav(
                     selected = selectedTab,
                     onSelect = vm::selectTab,
@@ -180,7 +201,7 @@ fun TeleStashApp(
             }
         },
         floatingActionButton = {
-            if (isReady && !selecting) {
+            if (showFab) {
                 AppFab(
                     vm = vm,
                     selectedTab = selectedTab,
@@ -215,9 +236,11 @@ fun TeleStashApp(
         photos = photos,
         viewer = viewer,
         updatedViewer = { viewer = it },
-        deleteTarget = deleteTarget,
-        updatedDeleteTarget = { deleteTarget = it },
-        confirmDelete = confirmDelete,
+        pendingDelete = pendingDelete,
+        updatedPendingDelete = { pendingDelete = it },
+        selectedCount = gallery.selected?.size ?: 0,
+        selectionActive = gallery.selected != null,
+        openTopicId = openTopicId,
         confirmLogout = confirmLogout,
         showNewAlbum = showNewAlbum,
         showAddToAlbum = showAddToAlbum,
@@ -259,13 +282,13 @@ private fun TabContent(
     uploadProgress: UploadProgress?,
     selectedTab: Int,
     openTopicId: Long,
-    albumCounts: List<TopicStats>,
+    albumCounts: List<TopicStats>?,
     padding: PaddingValues,
     onOpenViewer: (StashItem) -> Unit,
     onNewAlbum: () -> Unit,
     onLogout: () -> Unit,
 ) {
-    val inAlbum = openTopicId != 0L
+    val inAlbum = selectedTab == AppViewModel.TAB_ALBUMS && openTopicId != 0L
     when (selectedTab) {
         AppViewModel.TAB_SETTINGS ->
             SettingsScreen(vm = vm, padding = padding, onLogout = onLogout)
@@ -285,7 +308,9 @@ private fun TabContent(
             } else {
                 AlbumsScreen(
                     albums = gallery.albums,
-                    counts = albumCounts.associate { it.topicId to it.count },
+                    counts = albumCounts.orEmpty().associate { it.topicId to it.count },
+                    countsLoaded = albumCounts != null,
+                    isLoading = gallery.syncing,
                     padding = padding,
                     onOpen = { vm.openTopic(it) },
                     onNewAlbum = onNewAlbum,
@@ -329,10 +354,15 @@ private fun AppFab(
 /** Branded placeholder instead of a bare spinner while TDLib boots. */
 @Composable
 private fun BrandedLoading() {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+    ) {
         Text("TeleStash", style = MaterialTheme.typography.displaySmall)
         Spacer(Modifier.height(16.dp))
         CircularProgressIndicator()
+        Spacer(Modifier.height(12.dp))
+        Text("Starting TeleStash…", style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -342,9 +372,11 @@ private fun ViewerDialogs(
     photos: LazyPagingItems<TimelineRow>,
     viewer: StashItem?,
     updatedViewer: (StashItem?) -> Unit,
-    deleteTarget: StashItem?,
-    updatedDeleteTarget: (StashItem?) -> Unit,
-    confirmDelete: Int?,
+    pendingDelete: PendingDelete?,
+    updatedPendingDelete: (PendingDelete?) -> Unit,
+    selectedCount: Int,
+    selectionActive: Boolean,
+    openTopicId: Long,
     confirmLogout: Boolean,
     showNewAlbum: Boolean,
     showAddToAlbum: Boolean,
@@ -354,9 +386,6 @@ private fun ViewerDialogs(
     updatedNewAlbum: (Boolean) -> Unit,
     updatedAddToAlbum: (Boolean) -> Unit,
 ) {
-    var dialogDelete by remember { mutableStateOf(confirmDelete) }
-    LaunchedEffect(confirmDelete) { dialogDelete = confirmDelete }
-
     val viewerItem = viewer
     if (viewerItem != null) {
         val items = snapshotPhotos(photos)
@@ -366,39 +395,47 @@ private fun ViewerDialogs(
             initialIndex = if (index >= 0) index else 0,
             onDownload = { item -> vm.download(item) },
             onDelete = { item ->
-                updatedDeleteTarget(item)
-                dialogDelete = 1
+                if (!selectionActive && pendingDelete !is PendingDelete.Selection) {
+                    updatedPendingDelete(PendingDelete.Viewer(item))
+                }
             },
-            onDismiss = { updatedViewer(null) },
+            onDismiss = {
+                updatedViewer(null)
+                updatedPendingDelete(null)
+            },
         )
     }
 
-    confirmDelete?.let { count ->
+    pendingDelete?.let { request ->
+        val count = request.count
         AlertDialog(
-            onDismissRequest = {
-                updatedDeleteTarget(null)
-                dialogDelete = null
+            onDismissRequest = { updatedPendingDelete(null) },
+            title = {
+                Text(if (count == 1) "Delete this item?" else "Delete $count items?")
             },
-            title = { Text("Delete ${if (count > 1) "$count items" else "this item"}?") },
-            text = { Text("This permanently removes it from your Telegram cloud. This can't be undone.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    val target = deleteTarget
-                    if (target != null) {
-                        vm.delete(target)
-                        updatedViewer(null)
+            text = {
+                Text(
+                    if (count == 1) {
+                        "This permanently removes it from your Telegram cloud. This can't be undone."
                     } else {
-                        vm.deleteSelected(snapshotPhotos(photos))
-                    }
-                    updatedDeleteTarget(null)
-                    dialogDelete = null
-                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                        "This permanently removes these $count items from your Telegram cloud. This can't be undone."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        when (request) {
+                            is PendingDelete.Viewer -> vm.delete(request.item)
+                            is PendingDelete.Selection -> vm.deleteSelected()
+                        }
+                        updatedViewer(null)
+                        updatedPendingDelete(null)
+                    },
+                ) { Text("Delete", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    updatedDeleteTarget(null)
-                    dialogDelete = null
-                }) { Text("Cancel") }
+                TextButton(onClick = { updatedPendingDelete(null) }) { Text("Cancel") }
             },
         )
     }
@@ -419,7 +456,15 @@ private fun ViewerDialogs(
     }
 
     if (showNewAlbum) NewAlbumDialog(vm, albums, onDismiss = { updatedNewAlbum(false) })
-    if (showAddToAlbum) AddToAlbumDialog(vm, albums, onDismiss = { updatedAddToAlbum(false) })
+    if (showAddToAlbum) {
+        AddToAlbumDialog(
+            vm = vm,
+            albums = albums,
+            selectedCount = selectedCount,
+            sourceAlbumId = openTopicId,
+            onDismiss = { updatedAddToAlbum(false) },
+        )
+    }
 }
 
 @Composable
@@ -448,20 +493,19 @@ private fun UploadFab(
             picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
         },
         icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-        text = { Text(if (inAlbum) "Add to album" else "Upload") },
+        text = { Text(if (inAlbum) "Add from device" else "Add media") },
     )
 }
 
-/** Three-destination bottom bar: the app's primary navigation. */
+/** Two media destinations; Settings lives in the top bar. */
 @Composable
 private fun BottomNav(
     selected: Int,
     onSelect: (Int) -> Unit,
 ) {
     NavigationBar {
-        NavItem(AppViewModel.TAB_PHOTOS, "Photos", Icons.Filled.PhotoLibrary, selected, onSelect, Modifier.weight(1f))
+        NavItem(AppViewModel.TAB_PHOTOS, "Library", Icons.Filled.PhotoLibrary, selected, onSelect, Modifier.weight(1f))
         NavItem(AppViewModel.TAB_ALBUMS, "Albums", Icons.Filled.PhotoAlbum, selected, onSelect, Modifier.weight(1f))
-        NavItem(AppViewModel.TAB_SETTINGS, "Settings", Icons.Filled.Settings, selected, onSelect, Modifier.weight(1f))
     }
 }
 
@@ -489,7 +533,6 @@ private fun NavItem(
     Column(
         modifier =
             modifier
-                .fillMaxHeight()
                 .selectable(
                     selected = selectedItem,
                     onClick = { onSelect(tab) },
@@ -530,6 +573,8 @@ private fun TopBars(
     onDownloadSelected: () -> Unit,
     onDeleteSelected: () -> Unit,
     onBack: () -> Unit,
+    onSettings: () -> Unit,
+    onNewAlbum: () -> Unit,
 ) {
     val albumTitle = albumName ?: "Album"
     when {
@@ -545,18 +590,41 @@ private fun TopBars(
 
         selectedTab == AppViewModel.TAB_SETTINGS -> SimpleTopBar("Settings")
 
-        selectedTab == AppViewModel.TAB_ALBUMS && inAlbum -> BackTopBar(albumTitle, onBack)
+        selectedTab == AppViewModel.TAB_ALBUMS && inAlbum -> BackTopBar(albumTitle, onBack, onSettings)
 
-        selectedTab == AppViewModel.TAB_ALBUMS -> SimpleTopBar("Albums")
+        selectedTab == AppViewModel.TAB_ALBUMS -> SimpleTopBar("Albums", onSettings, onNewAlbum)
 
-        else -> SimpleTopBar("TeleStash")
+        else -> SimpleTopBar("Library", onSettings)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SimpleTopBar(title: String) {
-    TopAppBar(title = { Text(title) })
+private fun SimpleTopBar(
+    title: String,
+    onSettings: (() -> Unit)? = null,
+    onNewAlbum: (() -> Unit)? = null,
+) {
+    TopAppBar(
+        title = {
+            Text(
+                title,
+                modifier = Modifier.semantics { heading() },
+            )
+        },
+        actions = {
+            if (onNewAlbum != null) {
+                IconButton(onClick = onNewAlbum) {
+                    Icon(Icons.Filled.Add, contentDescription = "New album")
+                }
+            }
+            if (onSettings != null) {
+                IconButton(onClick = onSettings) {
+                    Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                }
+            }
+        },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -564,12 +632,23 @@ private fun SimpleTopBar(title: String) {
 private fun BackTopBar(
     title: String,
     onBack: () -> Unit,
+    onSettings: () -> Unit,
 ) {
     TopAppBar(
-        title = { Text(title) },
+        title = {
+            Text(
+                title,
+                modifier = Modifier.semantics { heading() },
+            )
+        },
         navigationIcon = {
             IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+        },
+        actions = {
+            IconButton(onClick = onSettings) {
+                Icon(Icons.Filled.Settings, contentDescription = "Settings")
             }
         },
     )
@@ -585,18 +664,47 @@ private fun SelectionTopBar(
     onDownload: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
     TopAppBar(
-        title = { Text("$count selected") },
+        title = {
+            Text(
+                "$count selected",
+                modifier = Modifier.semantics { heading() },
+            )
+        },
         navigationIcon = {
             IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, contentDescription = "Cancel") }
         },
         actions = {
-            IconButton(onClick = onSelectAll) { Icon(Icons.Filled.SelectAll, contentDescription = "Select all") }
-            IconButton(onClick = onAddToAlbum) {
-                Icon(Icons.Filled.PhotoAlbum, contentDescription = "Move to album")
+            IconButton(onClick = onSelectAll) {
+                Icon(Icons.Filled.SelectAll, contentDescription = "Select all loaded")
             }
-            IconButton(onClick = onDownload) { Icon(Icons.Filled.Download, contentDescription = "Download") }
-            IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, contentDescription = "Delete") }
+            IconButton(onClick = { menuOpen = true }) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "More actions")
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Move to album") },
+                    onClick = {
+                        menuOpen = false
+                        onAddToAlbum()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Save to device") },
+                    onClick = {
+                        menuOpen = false
+                        onDownload()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Delete") },
+                    onClick = {
+                        menuOpen = false
+                        onDelete()
+                    },
+                )
+            }
         },
     )
 }
@@ -606,6 +714,7 @@ private fun snapshotPhotos(photos: LazyPagingItems<TimelineRow>): List<StashItem
     photos.itemSnapshotList.items.mapNotNull { (it as? TimelineRow.Photo)?.item }
 
 @OptIn(ExperimentalFoundationApi::class)
+@Suppress("CyclomaticComplexMethod")
 @Composable
 private fun GalleryScreen(
     vm: AppViewModel,
@@ -619,23 +728,66 @@ private fun GalleryScreen(
 ) {
     val gridState = rememberLazyGridState()
     val selecting = gallery.selected != null
+    val mediaFilter by vm.mediaFilter.collectAsStateWithLifecycle()
+    val inAlbum = selectedTab == AppViewModel.TAB_ALBUMS && openTopicId != 0L
 
-    if (openTopicId == 0L) {
+    LaunchedEffect(selectedTab, openTopicId) {
+        if (selectedTab != AppViewModel.TAB_PHOTOS || openTopicId != 0L) {
+            vm.setMediaFilter(AppViewModel.FILTER_ALL)
+        }
+    }
+
+    if (gallery.hasMore) {
         EndlessScrollTrigger(gridState, photos.itemCount) { vm.loadMore() }
     }
 
     when {
-        // First sync: skeleton grid so the app doesn't look empty-dead.
-        photos.itemCount == 0 && gallery.syncing -> SkeletonGrid(padding)
+        photos.itemCount == 0 && (gallery.syncing || gallery.loadingMore) -> {
+            if (uploadProgress == null) {
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(padding),
+                ) {
+                    MediaFilterRow(vm)
+                    SkeletonGrid(PaddingValues(0.dp), Modifier.weight(1f))
+                }
+            } else {
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(padding),
+                ) {
+                    MediaFilterRow(vm)
+                    UploadProgressRow(uploadProgress)
+                    SkeletonGrid(PaddingValues(0.dp), Modifier.weight(1f))
+                }
+            }
+        }
 
-        // Sync failed and there's nothing to show: give a retry, not a dead end.
         photos.itemCount == 0 && gallery.syncError && !gallery.syncing ->
-            SyncErrorPanel(padding) { vm.refresh() }
+            GalleryStatePanel(
+                vm = vm,
+                padding = padding,
+                isError = true,
+                inAlbum = inAlbum,
+                mediaFilter = mediaFilter,
+                uploadProgress = uploadProgress,
+                onRetry = vm::refresh,
+                onOpenSettings = { vm.selectTab(AppViewModel.TAB_SETTINGS) },
+            )
 
         photos.itemCount == 0 && !gallery.syncing ->
-            EmptyGallery(padding) {
-                vm.refresh()
-            }
+            GalleryStatePanel(
+                vm = vm,
+                padding = padding,
+                isError = false,
+                inAlbum = inAlbum,
+                mediaFilter = mediaFilter,
+                uploadProgress = uploadProgress,
+                onRetry = vm::refresh,
+                onOpenSettings = { vm.selectTab(AppViewModel.TAB_SETTINGS) },
+            )
 
         else ->
             GalleryBody(
@@ -644,6 +796,7 @@ private fun GalleryScreen(
                 photos = photos,
                 uploadProgress = uploadProgress,
                 selectedTab = selectedTab,
+                inAlbum = inAlbum,
                 gridState = gridState,
                 selecting = selecting,
                 padding = padding,
@@ -659,13 +812,13 @@ private fun GalleryBody(
     photos: LazyPagingItems<TimelineRow>,
     uploadProgress: UploadProgress?,
     selectedTab: Int,
+    inAlbum: Boolean,
     gridState: LazyGridState,
     selecting: Boolean,
     padding: PaddingValues,
     onItemClick: (StashItem) -> Unit,
 ) {
-    val inPhotos =
-        selectedTab == AppViewModel.TAB_PHOTOS && gallery.openTopicId == 0L
+    val inPhotos = selectedTab == AppViewModel.TAB_PHOTOS && !inAlbum
 
     PullToRefreshBox(
         isRefreshing = gallery.syncing,
@@ -676,11 +829,14 @@ private fun GalleryBody(
                 .padding(padding),
     ) {
         Column(Modifier.fillMaxSize()) {
+            if (gallery.syncError && !gallery.syncing) {
+                SyncErrorBanner(inAlbum = inAlbum, onRetry = vm::refresh)
+            }
             if (inPhotos && !selecting) {
                 BackupStatusBanner(vm, gallery, uploadProgress)
+            } else if (inAlbum && !selecting) {
+                UploadProgressRow(uploadProgress)
             }
-            if (gallery.loadingMore) LinearProgressIndicator(Modifier.fillMaxWidth())
-
             if (!selecting) MediaFilterRow(vm)
 
             MediaGrid(
@@ -711,73 +867,84 @@ private fun BackupStatusBanner(
     val autoBackup by vm.autoBackup.collectAsStateWithLifecycle(initialValue = false)
     val wifiOnly by vm.wifiOnly.collectAsStateWithLifecycle(initialValue = true)
     val chargingOnly by vm.chargingOnly.collectAsStateWithLifecycle(initialValue = false)
-    // Recomputed when either preference flips; network changes land on next pass.
     val waitReason =
         remember(wifiOnly, chargingOnly) {
             BackupGate.waitReason(context, wifiOnly, chargingOnly)
         }
-
     val progress = uploadProgress
     if (progress != null) {
         UploadProgressRow(progress)
         return
     }
-    val count = gallery.newMediaCount
-    if (count == 0) return
 
-    if (autoBackup && waitReason != null) {
-        Surface(
-            color = MaterialTheme.colorScheme.secondaryContainer,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            ) {
-                Icon(
-                    Icons.Filled.CloudOff,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    "$waitReason · $count item(s) waiting",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-        }
+    val count = gallery.newMediaCount
+    if (!autoBackup) {
+        BackupNotice(
+            icon = Icons.Filled.PhotoLibrary,
+            title = "Backup is off",
+            subtitle = "Turn on automatic backup to keep new photos safe.",
+            action = "Set up backup",
+            onAction = { vm.selectTab(AppViewModel.TAB_SETTINGS) },
+        )
         return
     }
+    if (count == 0) return
 
-    if (!autoBackup) {
-        Surface(
-            color = MaterialTheme.colorScheme.primaryContainer,
-            modifier = Modifier.fillMaxWidth(),
+    if (waitReason != null) {
+        BackupNotice(
+            icon = Icons.Filled.CloudOff,
+            title = "Backup paused · $waitReason",
+            subtitle = "${itemCount(count)} waiting for the next eligible backup.",
+        )
+    } else {
+        BackupNotice(
+            icon = Icons.Filled.CloudUpload,
+            title = "${itemCount(count)} waiting to back up",
+            subtitle = "The next scheduled backup will handle them.",
+        )
+    }
+}
+
+@Composable
+private fun BackupNotice(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    action: String? = null,
+    onAction: () -> Unit = {},
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.primaryContainer,
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .semantics { liveRegion = LiveRegionMode.Polite },
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
-            ) {
-                Icon(
-                    Icons.Filled.PhotoLibrary,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.size(20.dp),
-                )
-                Spacer(Modifier.width(8.dp))
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
                 Text(
-                    if (count == 1) "1 new item not backed up" else "$count new items not backed up",
-                    style = MaterialTheme.typography.bodyMedium,
+                    title,
+                    style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = { vm.uploadPending() }) { Text("Back up") }
-                IconButton(onClick = { vm.dismissNewMedia() }) {
-                    Icon(Icons.Filled.Close, contentDescription = "Dismiss")
-                }
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
+            if (action != null) {
+                TextButton(onClick = onAction) { Text(action) }
             }
         }
     }
@@ -787,16 +954,21 @@ private fun BackupStatusBanner(
 @Composable
 private fun UploadProgressRow(progress: UploadProgress?) {
     if (progress == null) return
-    val done = progress.done + 1
-    val total = progress.total
+    val total = progress.total.coerceAtLeast(0)
+    val done = progress.done.coerceIn(0, total)
+    val fraction = if (total > 0) done.toFloat() / total else 0f
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 2.dp),
+            .padding(horizontal = 12.dp, vertical = 2.dp)
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Uploading $done of $total"
+                liveRegion = LiveRegionMode.Polite
+            },
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "Uploading $done of $total …",
+                "Uploading $done of $total",
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f),
             )
@@ -807,7 +979,7 @@ private fun UploadProgressRow(progress: UploadProgress?) {
             )
         }
         LinearProgressIndicator(
-            progress = { if (total > 0) done.toFloat() / total else 0f },
+            progress = { fraction },
             modifier = Modifier.fillMaxWidth(),
         )
     }
@@ -815,14 +987,20 @@ private fun UploadProgressRow(progress: UploadProgress?) {
 
 /** Placeholder grid shown during the very first cloud sync. */
 @Composable
-private fun SkeletonGrid(padding: PaddingValues) {
+private fun SkeletonGrid(
+    padding: PaddingValues,
+    modifier: Modifier = Modifier.fillMaxSize(),
+) {
     LazyVerticalGrid(
         columns = GridCells.Adaptive(minSize = 110.dp),
         contentPadding = PaddingValues(2.dp),
         modifier =
-            Modifier
-                .fillMaxSize()
-                .padding(padding),
+            modifier
+                .padding(padding)
+                .semantics {
+                    contentDescription = "Loading library"
+                    liveRegion = LiveRegionMode.Polite
+                },
     ) {
         items(SKELETON_CELLS) {
             Box(
@@ -836,76 +1014,123 @@ private fun SkeletonGrid(padding: PaddingValues) {
     }
 }
 
-/** Retry surface for a failed gallery load, instead of a silently empty grid. */
+private fun itemCount(count: Int): String = if (count == 1) "1 item" else "$count items"
+
 @Composable
-private fun SyncErrorPanel(
+private fun GalleryStatePanel(
+    vm: AppViewModel,
     padding: PaddingValues,
+    isError: Boolean,
+    inAlbum: Boolean,
+    mediaFilter: Int,
+    uploadProgress: UploadProgress?,
     onRetry: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
-    Box(
-        Modifier
-            .fillMaxSize()
-            .padding(padding),
-        contentAlignment = Alignment.Center,
+    val (title, message) = galleryStateCopy(isError, inAlbum, mediaFilter)
+    val icon = if (isError) Icons.Filled.CloudOff else Icons.Filled.PhotoLibrary
+    val iconTint = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+
+    Column(
+        modifier =
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(
-                Icons.Filled.CloudOff,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.error,
-                modifier = Modifier.size(48.dp),
-            )
-            Spacer(Modifier.height(12.dp))
-            Text(
-                "Couldn't load your library",
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Check your connection and try again.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(16.dp))
-            TextButton(onClick = onRetry) { Text("Retry") }
+        UploadProgressRow(uploadProgress)
+        MediaFilterRow(vm)
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = iconTint,
+            modifier = Modifier.size(if (isError) 48.dp else 52.dp),
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            textAlign = TextAlign.Center,
+            modifier =
+                Modifier.semantics {
+                    heading()
+                    liveRegion = LiveRegionMode.Polite
+                },
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            message,
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(16.dp))
+        TextButton(onClick = onRetry) { Text(if (isError) "Retry" else "Refresh") }
+        if (!isError && !inAlbum && mediaFilter == AppViewModel.FILTER_ALL) {
+            TextButton(onClick = onOpenSettings) { Text("Set up backup") }
         }
     }
 }
 
-/** Empty library: a gentle nudge to back up from the device or turn on backup. */
+private fun galleryStateCopy(
+    isError: Boolean,
+    inAlbum: Boolean,
+    mediaFilter: Int,
+): Pair<String, String> =
+    when {
+        isError && inAlbum -> "Couldn't load this album" to "Check your connection and try again."
+        isError -> "Couldn't load your library" to "Check your connection and try again."
+        inAlbum && mediaFilter == AppViewModel.FILTER_PHOTOS ->
+            "No photos in this album" to "Try another filter or move items into this album."
+        inAlbum && mediaFilter == AppViewModel.FILTER_VIDEOS ->
+            "No videos in this album" to "Try another filter or move items into this album."
+        inAlbum -> "This album is empty" to "Move photos and videos here from your library."
+        mediaFilter == AppViewModel.FILTER_PHOTOS ->
+            "No photos found" to "Try another filter or pull down to refresh."
+        mediaFilter == AppViewModel.FILTER_VIDEOS ->
+            "No videos found" to "Try another filter or pull down to refresh."
+        else ->
+            "Your media lives here" to
+                "Back up your camera roll, or check back once media arrives. Pull down to refresh."
+    }
+
 @Composable
-private fun EmptyGallery(
-    padding: PaddingValues,
+private fun SyncErrorBanner(
+    inAlbum: Boolean,
     onRetry: () -> Unit,
 ) {
-    Box(
-        Modifier
-            .fillMaxSize()
-            .padding(padding),
-        contentAlignment = Alignment.Center,
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .semantics { liveRegion = LiveRegionMode.Polite },
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+        ) {
             Icon(
-                Icons.Filled.PhotoLibrary,
+                Icons.Filled.CloudOff,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(52.dp),
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(20.dp),
             )
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.width(8.dp))
             Text(
-                "Your photos live here",
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Back up your camera roll, or check back once media arrives.\n" +
-                    "Pull down to refresh.",
-                textAlign = TextAlign.Center,
+                if (inAlbum) {
+                    "Showing saved items. Couldn't refresh this album."
+                } else {
+                    "Showing saved items. Couldn't refresh your library."
+                },
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.height(16.dp))
-            TextButton(onClick = onRetry) { Text("Refresh") }
+            TextButton(onClick = onRetry) { Text("Retry") }
         }
     }
 }
@@ -991,7 +1216,8 @@ private fun MediaGrid(
                                 Modifier
                                     .fillMaxWidth()
                                     .background(MaterialTheme.colorScheme.surface)
-                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                                    .semantics { heading() },
                         )
                     is TimelineRow.Photo -> {
                         val item = row.item
@@ -999,6 +1225,7 @@ private fun MediaGrid(
                         GalleryCell(
                             item = item,
                             selected = isSelected,
+                            selectionMode = selecting,
                             onClick = {
                                 if (selecting) {
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -1032,88 +1259,23 @@ private fun MediaGrid(
                         contentAlignment = Alignment.Center,
                     ) { CircularProgressIndicator() }
                 }
+            } else if (photos.itemCount > 0 && !gallery.hasMore) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Text(
+                        "End of library",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 16.dp),
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
-        }
-        DateScrubber(photos, gridState)
-    }
-}
-
-/**
- * Google Photos style date scrubber: drag the edge rail to jump through the
- * timeline, with a month bubble. Only shown for libraries big enough to need it.
- */
-@Composable
-private fun DateScrubber(
-    photos: LazyPagingItems<TimelineRow>,
-    gridState: LazyGridState,
-) {
-    if (photos.itemCount < DATE_SCRUBBER_MIN_ITEMS) return
-    val scope = rememberCoroutineScope()
-    var dragging by remember { mutableStateOf(false) }
-    var fraction by remember { mutableFloatStateOf(0f) }
-    var railHeight by remember { mutableFloatStateOf(1f) }
-    var scrollJob by remember { mutableStateOf<Job?>(null) }
-
-    fun labelAt(f: Float): String {
-        val index = (f * (photos.itemCount - 1)).toInt().coerceIn(0, photos.itemCount - 1)
-        return when (val row = photos.peek(index)) {
-            is TimelineRow.Month -> row.label
-            is TimelineRow.Photo -> Format.monthYear(row.item.date)
-            null -> ""
-        }
-    }
-
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterEnd) {
-        if (dragging) {
-            Surface(
-                shape = MaterialTheme.shapes.medium,
-                tonalElevation = 4.dp,
-                modifier = Modifier.padding(end = 32.dp),
-            ) {
-                Text(
-                    labelAt(fraction),
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                )
-            }
-        }
-        Box(
-            Modifier
-                .fillMaxHeight()
-                .width(28.dp)
-                .onSizeChanged { railHeight = it.height.toFloat().coerceAtLeast(1f) }
-                .draggable(
-                    state =
-                        rememberDraggableState { delta ->
-                            val next = (fraction + delta / railHeight).coerceIn(0f, 1f)
-                            fraction = next
-                            val index = (next * (photos.itemCount - 1)).toInt()
-                            // A fast drag enqueues scrolls faster than they settle;
-                            // only the newest jump should ever land.
-                            scrollJob?.cancel()
-                            scrollJob = scope.launch { gridState.scrollToItem(index) }
-                        },
-                    orientation = Orientation.Vertical,
-                    onDragStarted = { dragging = true },
-                    onDragStopped = { dragging = false },
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(
-                Modifier
-                    .padding(vertical = 48.dp)
-                    .fillMaxHeight()
-                    .width(4.dp)
-                    .background(
-                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                        MaterialTheme.shapes.small,
-                    ),
-            )
         }
     }
 }
-
-private const val DATE_SCRUBBER_MIN_ITEMS = 100
 
 /** Fires [onLoadMore] when the grid nears its loaded end (endless scroll). */
 @Composable

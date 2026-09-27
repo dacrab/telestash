@@ -6,8 +6,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -21,13 +23,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import com.telestash.AppViewModel
 import com.telestash.data.AlbumEntity
 
 private const val MAX_ALBUM_NAME = 64
 
-/** Dialog: create a new album (Saved Messages topic). */
 @Composable
 fun NewAlbumDialog(
     vm: AppViewModel,
@@ -57,7 +60,7 @@ fun NewAlbumDialog(
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Albums live as topics in your Saved Messages. Backed-up photos can be moved into them later.",
+                    "Use albums to group related media together.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -76,67 +79,155 @@ fun NewAlbumDialog(
     )
 }
 
-/** Dialog: pick an existing album or create a new one for the selected items. */
 @Composable
 fun AddToAlbumDialog(
     vm: AppViewModel,
     albums: List<AlbumEntity>,
+    selectedCount: Int,
+    sourceAlbumId: Long,
     onDismiss: () -> Unit,
 ) {
-    var newAlbumName by remember { mutableStateOf("") }
-    var chosenExisting by remember { mutableStateOf<Long?>(null) }
+    var newAlbumName by remember(sourceAlbumId) { mutableStateOf("") }
+    var chosenExisting by remember(sourceAlbumId) { mutableStateOf<Long?>(null) }
+    val trimmedName = newAlbumName.trim()
+    val duplicateName = trimmedName.isNotBlank() && albums.any { it.name.equals(trimmedName, ignoreCase = true) }
+    val countText = if (selectedCount == 1) "1 item" else "$selectedCount items"
+    val sourceText = sourceDescription(albums, sourceAlbumId)
+    val destinationText = destinationDescription(albums, chosenExisting, trimmedName)
+    val canMove = canMove(selectedCount, chosenExisting, sourceAlbumId, trimmedName, duplicateName)
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Move to album") },
+        title = { Text("Move $countText to an album") },
         text = {
             Column {
-                if (albums.isEmpty()) {
-                    Text("No albums yet. Create one below.")
-                } else {
-                    LazyColumn(Modifier.heightIn(max = 300.dp)) {
-                        items(albums, key = { it.topicId }) { album ->
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Text(album.name, Modifier.weight(1f))
-                                RadioButton(
-                                    selected = chosenExisting == album.topicId,
-                                    onClick = { chosenExisting = album.topicId },
-                                )
-                            }
-                        }
-                    }
-                }
+                Text(
+                    "Move $countText $sourceText. The originals will be removed from the current view.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(8.dp))
+                AlbumChoices(albums, sourceAlbumId, chosenExisting) { chosenExisting = it }
                 Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
+                NewAlbumNameField(
                     value = newAlbumName,
+                    duplicateName = duplicateName,
+                    destinationText = destinationText,
                     onValueChange = {
                         newAlbumName = it.take(MAX_ALBUM_NAME)
                         if (newAlbumName.isNotBlank()) chosenExisting = null
                     },
-                    label = { Text("New album name") },
-                    supportingText = {
-                        Text("Selected items move out of the main timeline into this album.")
-                    },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
                 )
             }
         },
         confirmButton = {
             TextButton(
-                enabled = chosenExisting != null || newAlbumName.isNotBlank(),
+                enabled = canMove,
                 onClick = {
                     vm.addSelectedToAlbum(
                         albumTopicId = chosenExisting ?: 0L,
-                        newAlbumName = newAlbumName.takeIf { it.isNotBlank() },
+                        newAlbumName = trimmedName.takeIf { it.isNotBlank() },
                     )
                     onDismiss()
                 },
-            ) { Text("Add") }
+            ) { Text("Move") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
+
+@Composable
+private fun AlbumChoices(
+    albums: List<AlbumEntity>,
+    sourceAlbumId: Long,
+    selectedId: Long?,
+    onSelect: (Long) -> Unit,
+) {
+    if (albums.isEmpty()) {
+        Text("No albums yet. Create one below.")
+        return
+    }
+    LazyColumn(Modifier.heightIn(max = 300.dp)) {
+        items(albums, key = { it.topicId }) { album ->
+            val current = album.topicId == sourceAlbumId
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .selectable(
+                            selected = selectedId == album.topicId,
+                            onClick = { onSelect(album.topicId) },
+                            enabled = !current,
+                            role = Role.RadioButton,
+                        ).padding(vertical = 8.dp),
+            ) {
+                Text(
+                    if (current) "${album.name} (current album)" else album.name,
+                    Modifier.weight(1f),
+                )
+                RadioButton(
+                    selected = selectedId == album.topicId,
+                    onClick = null,
+                    enabled = !current,
+                    modifier = Modifier.clearAndSetSemantics {},
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NewAlbumNameField(
+    value: String,
+    duplicateName: Boolean,
+    destinationText: String,
+    onValueChange: (String) -> Unit,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text("New album name") },
+        isError = duplicateName,
+        supportingText = {
+            Text(if (duplicateName) "An album with this name already exists." else destinationText)
+        },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+private fun sourceDescription(
+    albums: List<AlbumEntity>,
+    sourceAlbumId: Long,
+): String {
+    val sourceName = albums.firstOrNull { it.topicId == sourceAlbumId }?.name
+    return when {
+        sourceName != null -> "from \"$sourceName\""
+        sourceAlbumId != 0L -> "from this album"
+        else -> "from your main library"
+    }
+}
+
+private fun destinationDescription(
+    albums: List<AlbumEntity>,
+    selectedId: Long?,
+    newName: String,
+): String {
+    val name =
+        selectedId?.let { id -> albums.firstOrNull { it.topicId == id }?.name }
+            ?: newName.takeIf { it.isNotBlank() }
+    return name?.let { "Destination: $it" } ?: "Choose a destination album."
+}
+
+private fun canMove(
+    selectedCount: Int,
+    selectedId: Long?,
+    sourceAlbumId: Long,
+    newName: String,
+    duplicateName: Boolean,
+): Boolean =
+    selectedCount > 0 &&
+        (
+            selectedId?.let { it != sourceAlbumId } == true ||
+                (newName.isNotBlank() && !duplicateName)
+        )
