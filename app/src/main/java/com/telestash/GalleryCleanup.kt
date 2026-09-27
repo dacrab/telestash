@@ -1,124 +1,111 @@
 package com.telestash
 
+import com.telestash.data.ExactHashCandidate
 import com.telestash.data.ItemDao
-import com.telestash.model.StashItem
-import com.telestash.model.toStashItem
 import com.telestash.td.TgClient
-import com.telestash.util.PerceptualHash
-import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** One set of interchangeable rows; the oldest is kept, the rest can go. */
+data class DuplicateItem(
+    val messageId: Long,
+    val chatId: Long,
+    val contentHash: String,
+)
+
 data class DuplicateGroup(
-    val items: List<StashItem>,
+    val items: List<DuplicateItem>,
     val keepMessageId: Long,
 )
 
-/** Result of a gallery health scan: unfixable rows plus duplicate groups. */
 data class GalleryHealth(
-    /** Rows whose file never arrived (size 0): previews can never load. */
-    val broken: List<StashItem>,
-    /** Content-identical groups (exact perceptual hash / name+size). */
     val duplicateGroups: List<DuplicateGroup>,
 ) {
-    val removableCount: Int get() = broken.size + duplicateGroups.sumOf { it.items.size - 1 }
+    val removableCount: Int get() = duplicateGroups.sumOf { it.items.size - 1 }
 }
 
-/** Gallery health scan and cleanup, owned by [AppViewModel]. */
+data class CleanupResult(
+    val removed: Int,
+    val failed: Int,
+    val error: String? = null,
+)
+
+private fun ExactHashCandidate.toDuplicateItem() =
+    DuplicateItem(
+        messageId = messageId,
+        chatId = chatId,
+        contentHash = contentHash.orEmpty(),
+    )
+
 class GalleryCleanup(
-    private val scope: CoroutineScope,
     private val dao: ItemDao,
     private val client: () -> TgClient?,
-    private val toast: (String) -> Unit,
+    private val accountId: suspend () -> Long,
 ) {
-    private companion object {
-        /** Room writes below 4000 rows can lock long enough to jank the grid. */
-        const val BACKFILL_CHUNK = 500
-    }
-
-    /** Scan Room for unloadable (size 0) rows and content-duplicate groups. */
     suspend fun scan(): GalleryHealth =
         withContext(Dispatchers.IO) {
-            backfillHashes()
-            val broken = dao.brokenItems().map { it.toStashItem() }
-            val rest = dao.cleanupCandidates()
-            val hashGroups =
-                rest
-                    .filter { !it.isVideo && it.phash != 0L }
-                    .groupBy { it.phash }
-                    .values
-                    .filter { it.size > 1 }
-            val nameGroups =
-                rest
-                    .groupBy { it.fileName to it.sizeBytes }
-                    .values
-                    .filter { it.size > 1 }
-            // Same item can match both ways: first claim wins, so every row
-            // is deleted at most once and groups keep at least the oldest.
-            val claimed = mutableSetOf<Long>()
-            val groups = mutableListOf<DuplicateGroup>()
-            (hashGroups + nameGroups).forEach { candidates ->
-                val fresh = candidates.filter { it.messageId !in claimed }
-                if (fresh.size > 1) {
-                    val keep = fresh.minByOrNull { it.messageId } ?: return@forEach
-                    claimed.addAll(fresh.map { it.messageId })
-                    groups.add(
-                        DuplicateGroup(
-                            items = fresh.map { it.toStashItem() },
-                            keepMessageId = keep.messageId,
-                        ),
-                    )
-                }
-            }
-            GalleryHealth(broken, groups)
-        }
-
-    /**
-     * Fills missing photo hashes from stored minithumbnails (no downloads).
-     * Mini-derived hashes use the same average-hash, so they match full-file
-     * hashes. Idempotent: rows that already have a hash are skipped. Chunked so
-     * a first-run backfill of thousands of rows can't drench Room in one write.
-     */
-    suspend fun backfillHashes(): Int =
-        withContext(Dispatchers.IO) {
-            val updated =
+            val groups =
                 dao
-                    .needsPhash()
-                    .mapNotNull { e ->
-                        val bytes = e.miniJpeg ?: return@mapNotNull null
-                        val hash = PerceptualHash.computeBytes(bytes) ?: return@mapNotNull null
-                        if (hash == 0L) null else e.copy(phash = hash)
+                    .cleanupCandidates()
+                    .filter { !it.contentHash.isNullOrBlank() }
+                    .groupBy { it.contentHash }
+                    .values
+                    .filter { it.size > 1 }
+                    .map { candidates ->
+                        DuplicateGroup(
+                            items = candidates.map { it.toDuplicateItem() },
+                            keepMessageId = candidates.minOf { it.messageId },
+                        )
                     }
-            if (updated.isNotEmpty()) {
-                updated.chunked(BACKFILL_CHUNK).forEach { dao.upsertAll(it) }
-            }
-            updated.size
+            GalleryHealth(groups)
         }
 
-    /** Delete scan results (broken rows + duplicate extras), oldest kept. */
-    fun clean(health: GalleryHealth) {
-        val doomed =
-            health.broken +
-                health.duplicateGroups.flatMap { g ->
-                    g.items.filter { it.messageId != g.keepMessageId }
-                }
-        if (doomed.isEmpty()) return
-        scope.launch(Dispatchers.IO) {
-            val c = client() ?: return@launch
-            // Local rows first: if the cloud delete fails, the next sync
-            // simply restores them instead of leaving invisible orphans.
-            dao.deleteAll(doomed.map { it.messageId })
-            runCatching {
-                doomed.groupBy { it.chatId }.forEach { (chat, list) ->
-                    c.deleteMessages(chat, list.map { it.messageId }.toLongArray())
-                }
-            }.onFailure { e ->
-                toast("Cleanup incomplete, will retry on sync: ${e.message}")
-                return@launch
-            }
-            toast("Removed ${doomed.size} item(s)")
-        }
+    private fun DuplicateGroup.verifiedExtras(): List<DuplicateItem> {
+        val keep = items.firstOrNull { it.messageId == keepMessageId } ?: return emptyList()
+        if (items.any { it.contentHash != keep.contentHash }) return emptyList()
+        return items.filter { it.messageId != keepMessageId }
     }
+
+    suspend fun clean(health: GalleryHealth): CleanupResult =
+        withContext(Dispatchers.IO) {
+            val doomed =
+                health.duplicateGroups
+                    .flatMap { it.verifiedExtras() }
+                    .distinctBy { it.messageId }
+            if (doomed.isEmpty()) return@withContext CleanupResult(0, 0)
+
+            val c = client()
+            if (c == null) {
+                return@withContext CleanupResult(0, doomed.size, "Telegram is not connected")
+            }
+            val currentAccountId =
+                try {
+                    accountId()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    return@withContext CleanupResult(0, doomed.size, e.message ?: "unknown error")
+                }
+
+            var removed = 0
+            val errors = mutableListOf<String>()
+            doomed.groupBy { it.chatId }.forEach { (chatId, items) ->
+                val ids = items.map { it.messageId }
+                try {
+                    c.deleteMessages(chatId, ids.toLongArray())
+                    dao.deleteAll(ids)
+                    dao.deleteRemoteMediaByMessageIds(currentAccountId, ids)
+                    removed += items.size
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    errors += e.message ?: "unknown error"
+                }
+            }
+            CleanupResult(
+                removed = removed,
+                failed = doomed.size - removed,
+                error = errors.firstOrNull(),
+            )
+        }
 }

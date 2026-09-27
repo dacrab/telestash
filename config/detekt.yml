@@ -3,21 +3,20 @@
 
 complexity:
   LongMethod:
-    # Largest composables (SettingsDialog) sit around 100 lines; splitting
-    # them further would hurt readability more than help.
     allowedLines: 120
   LongParameterList:
-    # Composables legitimately take many callbacks (TopBars has 14);
-    # bundling them into wrapper objects would add noise, not clarity.
     active: false
   TooManyFunctions:
-    # AppViewModel is the single ViewModel for the whole app by design.
-    active: false
+    allowedFunctionsPerFile: 30
+    allowedFunctionsPerClass: 50
+    allowedFunctionsPerInterface: 30
+    allowedFunctionsPerObject: 20
+    allowedFunctionsPerEnum: 10
 
 style:
   ReturnCount:
-    # Early-return chains in TDLib error/state handling are clearer than nesting.
-    active: false
+    max: 6
+    excludeGuardClauses: true
 
 naming:
   FunctionNaming:

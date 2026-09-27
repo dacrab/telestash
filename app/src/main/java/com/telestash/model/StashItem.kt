@@ -9,6 +9,8 @@ data class StashItem(
     val chatId: Long,
     val date: Int,
     val fileId: Int,
+    val remoteUniqueId: String? = null,
+    val remoteFileId: String? = null,
     val fileName: String,
     val sizeBytes: Long,
     val isVideo: Boolean,
@@ -17,10 +19,6 @@ data class StashItem(
     val deviceUri: String? = null,
     /** SHA-256 hex of the device original; set only for device backups. */
     val contentHash: String? = null,
-    /** Saved Messages topic id (album); 0 = main gallery. */
-    val topicId: Long = 0L,
-    /** 64-bit perceptual hash; 0 = not computed. */
-    val phash: Long = 0L,
     /** TDLib thumbnail file id for cheap grid previews; 0 = none. */
     val thumbFileId: Int = 0,
     /** TDLib minithumbnail JPEG bytes for an instant placeholder; null if none. */
@@ -42,12 +40,16 @@ data class StashItem(
                         chatId = msg.chatId,
                         date = msg.date,
                         fileId = c.document.document.id,
+                        remoteUniqueId =
+                            c.document.document.remote
+                                ?.uniqueId,
+                        remoteFileId =
+                            c.document.document.remote
+                                ?.id,
                         fileName = name,
-                        sizeBytes = c.document.document.expectedSize,
+                        sizeBytes = fileSize(c.document.document),
                         isVideo = isGalleryVideo(c.document.mimeType, name),
-                        localPath =
-                            c.document.document.local.path
-                                .ifBlank { null },
+                        localPath = localPath(c.document.document),
                         thumbFileId =
                             c.document.thumbnail
                                 ?.file
@@ -65,12 +67,12 @@ data class StashItem(
                         chatId = msg.chatId,
                         date = msg.date,
                         fileId = biggest.photo.id,
+                        remoteUniqueId = biggest.photo.remote?.uniqueId,
+                        remoteFileId = biggest.photo.remote?.id,
                         fileName = "photo_${msg.id}.jpg",
-                        sizeBytes = biggest.photo.expectedSize,
+                        sizeBytes = fileSize(biggest.photo),
                         isVideo = false,
-                        localPath =
-                            biggest.photo.local.path
-                                .ifBlank { null },
+                        localPath = localPath(biggest.photo),
                         thumbFileId = smallest.photo.id,
                         miniJpeg = c.photo.minithumbnail?.data,
                     )
@@ -81,12 +83,16 @@ data class StashItem(
                         chatId = msg.chatId,
                         date = msg.date,
                         fileId = c.video.video.id,
+                        remoteUniqueId =
+                            c.video.video.remote
+                                ?.uniqueId,
+                        remoteFileId =
+                            c.video.video.remote
+                                ?.id,
                         fileName = c.video.fileName.ifBlank { "video_${msg.id}.mp4" },
-                        sizeBytes = c.video.video.expectedSize,
+                        sizeBytes = fileSize(c.video.video),
                         isVideo = true,
-                        localPath =
-                            c.video.video.local.path
-                                .ifBlank { null },
+                        localPath = localPath(c.video.video),
                         thumbFileId =
                             c.video.thumbnail
                                 ?.file
@@ -98,15 +104,20 @@ data class StashItem(
             }
         }
 
+        private fun localPath(file: TdApi.File): String? =
+            file.local
+                ?.path
+                ?.takeIf { file.local?.isDownloadingCompleted == true }
+                ?.takeIf { it.isNotBlank() }
+
+        private fun fileSize(file: TdApi.File): Long = file.size.takeIf { it > 0L } ?: file.expectedSize
+
         private fun isGalleryVideo(
             mime: String,
             name: String,
         ): Boolean = mime.startsWith("video/") || FileTypes.isVideoName(name)
 
-        /**
-         * Accept image/video mimes; a blank mime (draft/legacy documents)
-         * falls back to a name-based guess.
-         */
+        /** Accept image/video MIME types and fall back to the filename when blank. */
         private fun isGalleryMime(
             mime: String,
             name: String,

@@ -15,10 +15,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AllInclusive
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
@@ -38,6 +38,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
@@ -71,11 +75,11 @@ fun OnboardingScreen(vm: AppViewModel) {
         Spacer(Modifier.height(32.dp))
         BrandHeader()
         Spacer(Modifier.height(24.dp))
-        FeatureRow(Icons.Filled.Lock, "Private", "Encrypted at rest in Saved Messages")
+        FeatureRow(Icons.Filled.Lock, "Direct to Telegram", "No TeleStash media server")
         Spacer(Modifier.height(8.dp))
-        FeatureRow(Icons.Filled.AllInclusive, "Unlimited", "Free, no quotas on your own Telegram")
+        FeatureRow(Icons.Filled.AllInclusive, "Saved Messages", "Uses your Telegram storage")
         Spacer(Modifier.height(8.dp))
-        FeatureRow(Icons.Filled.Send, "Automatic", "Backs up new photos as they arrive")
+        FeatureRow(Icons.AutoMirrored.Filled.Send, "Automatic backup", "Choose when new photos are uploaded")
         Spacer(Modifier.height(24.dp))
         CredentialsCard(vm)
         Spacer(Modifier.height(16.dp))
@@ -100,10 +104,14 @@ private fun BrandHeader() {
         }
     }
     Spacer(Modifier.height(16.dp))
-    Text("TeleStash", style = MaterialTheme.typography.displaySmall)
+    Text(
+        "TeleStash",
+        style = MaterialTheme.typography.displaySmall,
+        modifier = Modifier.semantics { heading() },
+    )
     Spacer(Modifier.height(4.dp))
     Text(
-        "Unlimited photo storage in your Telegram",
+        "A calm home for your Telegram photos",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         textAlign = TextAlign.Center,
@@ -111,6 +119,7 @@ private fun BrandHeader() {
 }
 
 /** Form to paste the Telegram API credentials and connect the account. */
+@Suppress("CyclomaticComplexMethod")
 @Composable
 private fun CredentialsCard(vm: AppViewModel) {
     var apiId by remember { mutableStateOf("") }
@@ -127,7 +136,9 @@ private fun CredentialsCard(vm: AppViewModel) {
             Text("Connect your Telegram app", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(4.dp))
             Text(
-                "TeleStash needs its own free API credentials. They never leave your device.",
+                "Telegram receives these credentials to authenticate your app. " +
+                    "Local metadata stays in app-private storage and is not separately encrypted by TeleStash. " +
+                    "TDLib's local database key is wrapped by Android Keystore.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -147,7 +158,7 @@ private fun CredentialsCard(vm: AppViewModel) {
             OutlinedTextField(
                 value = apiId,
                 onValueChange = { apiId = it.filter { ch -> ch.isDigit() } },
-                label = { Text("api_id") },
+                label = { Text("App API ID") },
                 isError = apiId.isNotEmpty() && !idValid,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 singleLine = true,
@@ -158,7 +169,7 @@ private fun CredentialsCard(vm: AppViewModel) {
             OutlinedTextField(
                 value = apiHash,
                 onValueChange = { apiHash = it.trim() },
-                label = { Text("api_hash") },
+                label = { Text("App API hash") },
                 visualTransformation =
                     if (hashVisible) VisualTransformation.None else PasswordVisualTransformation(),
                 trailingIcon = {
@@ -185,13 +196,16 @@ private fun CredentialsCard(vm: AppViewModel) {
                     authError.orEmpty(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 )
             }
             Spacer(Modifier.height(12.dp))
             Button(
                 onClick = {
                     saving = true
-                    vm.saveCredentials(apiId, apiHash)
+                    vm.saveCredentials(apiId, apiHash).invokeOnCompletion {
+                        saving = false
+                    }
                 },
                 enabled = idValid && hashValid && !saving,
                 modifier = Modifier.fillMaxWidth(),
@@ -201,13 +215,19 @@ private fun CredentialsCard(vm: AppViewModel) {
                     Spacer(Modifier.width(8.dp))
                     Text("Connecting…")
                 } else {
-                    Text("Save and connect")
+                    Text("Continue")
                 }
             }
-            TextButton(onClick = {
-                apiId = ""
-                apiHash = ""
-            }) { Text("Start over") }
+            if (apiId.isNotBlank() || apiHash.isNotBlank() || authError != null) {
+                TextButton(
+                    enabled = !saving,
+                    onClick = {
+                        saving = false
+                        apiId = ""
+                        apiHash = ""
+                    },
+                ) { Text("Start over") }
+            }
         }
     }
 }

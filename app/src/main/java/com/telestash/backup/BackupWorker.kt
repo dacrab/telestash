@@ -6,13 +6,16 @@ import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.telestash.data.ItemDao
 import com.telestash.data.SettingsRepository
 import com.telestash.data.StashDbHolder
 import com.telestash.td.TdException
 import com.telestash.td.TgClient
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -43,28 +46,39 @@ class BackupWorker(
 
     override suspend fun doWork(): Result =
         withContext(Dispatchers.IO) {
-            val client = ensureTdlib() ?: return@withContext Result.retry()
+            val settings = SettingsRepository(applicationContext)
+            if (!settings.autoBackup.first()) return@withContext Result.success()
+            val client = ensureTdlib() ?: return@withContext Result.failure()
 
             BackupEngine.sweepStaleStaged(applicationContext)
             val dao = StashDbHolder.db(applicationContext).itemDao()
-            val settings = SettingsRepository(applicationContext)
+            val accountId =
+                try {
+                    prepareAccount(client, settings, dao)
+                } catch (e: TdException) {
+                    if (e.isFloodWait) {
+                        scheduleFloodRetry(e.floodWaitSeconds)
+                        return@withContext Result.success()
+                    }
+                    return@withContext Result.failure()
+                }
             val candidates =
                 BackupEngine.pending(applicationContext, dao, settings.backupFolders.first())
             if (candidates.isEmpty()) return@withContext Result.success()
 
-            startForeground(candidates.size)
+            if (!startForeground(candidates.size)) return@withContext Result.retry()
             try {
                 val summary =
-                    BackupEngine.exclusive {
-                        BackupEngine.backupAll(
-                            applicationContext,
-                            client,
-                            dao,
-                            candidates,
-                            settings.dedupeEnabled.first(),
-                            onProgress = { done, total -> updateProgress(done, total) },
-                        )
-                    }
+                    BackupEngine.backupAll(
+                        applicationContext,
+                        client,
+                        dao,
+                        candidates,
+                        settings.dedupeEnabled.first(),
+                        remoteDedupe = settings.remoteDedupeEnabled.first(),
+                        accountId = accountId,
+                        onProgress = { done, total -> updateProgress(done, total) },
+                    )
                 if (summary.allFailed) Result.retry() else Result.success()
             } catch (e: TdException) {
                 // FLOOD_WAIT: retry after the server-requested pause instead of
@@ -78,32 +92,40 @@ class BackupWorker(
             }
         }
 
-    private fun startForeground(total: Int) {
+    private suspend fun startForeground(total: Int): Boolean {
         BackupNotifications.ensureChannel(applicationContext)
-        runCatching {
-            setForegroundAsync(
+        try {
+            setForeground(
                 ForegroundInfo(
                     BackupNotifications.NOTIFICATION_ID,
                     BackupNotifications.progress(applicationContext, 0, total),
                 ),
             )
+            return true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return false
         }
     }
 
     /** Refresh the notification at most a few times per run, not once per item. */
-    private fun updateProgress(
+    private suspend fun updateProgress(
         done: Int,
         total: Int,
     ) {
         if (done == total || done % PROGRESS_NOTIFY_EVERY == 0) {
             BackupNotifications.ensureChannel(applicationContext)
-            runCatching {
-                setForegroundAsync(
+            try {
+                setForeground(
                     ForegroundInfo(
                         BackupNotifications.NOTIFICATION_ID,
                         BackupNotifications.progress(applicationContext, done, total),
                     ),
                 )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
             }
         }
     }
@@ -112,20 +134,29 @@ class BackupWorker(
     private suspend fun scheduleFloodRetry(floodWaitSeconds: Long) {
         if (floodWaitSeconds <= 0) return
         val settings = SettingsRepository(applicationContext)
-        val constraints =
-            Constraints
-                .Builder()
-                .setRequiredNetworkType(if (settings.wifiOnly.first()) NetworkType.UNMETERED else NetworkType.CONNECTED)
-                .setRequiresCharging(settings.chargingOnly.first())
-                .build()
         WorkManager.getInstance(applicationContext).enqueueUniqueWork(
             ONE_SHOT,
             ExistingWorkPolicy.REPLACE,
-            OneTimeWorkRequestBuilder<BackupWorker>()
-                .setInitialDelay(floodWaitSeconds, TimeUnit.SECONDS)
-                .setConstraints(constraints)
-                .build(),
+            oneTimeRequest(settings, floodWaitSeconds),
         )
+    }
+
+    private suspend fun oneTimeRequest(
+        settings: SettingsRepository,
+        initialDelaySeconds: Long,
+    ): OneTimeWorkRequest {
+        val networkType =
+            if (settings.wifiOnly.first()) NetworkType.UNMETERED else NetworkType.CONNECTED
+        val constraints =
+            Constraints
+                .Builder()
+                .setRequiredNetworkType(networkType)
+                .setRequiresCharging(settings.chargingOnly.first())
+                .build()
+        return OneTimeWorkRequestBuilder<BackupWorker>()
+            .setInitialDelay(initialDelaySeconds, TimeUnit.SECONDS)
+            .setConstraints(constraints)
+            .build()
     }
 
     /**
@@ -133,6 +164,30 @@ class BackupWorker(
      * the local database (no login needed once authorized). Null when there are
      * no stored credentials or Telegram wants an interactive login.
      */
+    private suspend fun prepareAccount(
+        client: TgClient,
+        settings: SettingsRepository,
+        dao: ItemDao,
+    ): Long {
+        val userId = client.currentUserId()
+        val previousUserId = settings.telegramUserId()
+        val unownedData =
+            previousUserId == 0L &&
+                (
+                    dao.hasGalleryItems() ||
+                        dao.hasRemoteMedia() ||
+                        dao.allContentHashes().isNotEmpty() ||
+                        dao.allUploadedHashes().isNotEmpty()
+                )
+        if (unownedData || (previousUserId != 0L && previousUserId != userId)) {
+            dao.clearAllAccountData()
+            BackupEngine.invalidateRemoteIndexCache()
+            settings.clearSyncWatermarks()
+        }
+        settings.setTelegramUserId(userId)
+        return userId
+    }
+
     private suspend fun ensureTdlib(): TgClient? {
         val settings = SettingsRepository(applicationContext)
         val (apiId, apiHash) = settings.credentialsOnce()
@@ -140,8 +195,12 @@ class BackupWorker(
         // Reuse the running client: creating a second one would build a rival session.
         val client =
             TgClient.peek()?.takeIf { it.isAuthorized } ?: run {
-                TgClient.getOrCreate(applicationContext, apiId, apiHash).also { it.start() }
+                TgClient.getOrCreate(applicationContext, apiId, apiHash).also {
+                    it.start()
+                    it.refreshAuthorizationState()
+                }
             }
+        if (!client.isAuthorized) client.refreshAuthorizationState()
         if (client.isAuthorized) return client
         return try {
             // The worker can run right after app death: give the session replay time to land.

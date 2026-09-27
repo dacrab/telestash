@@ -10,6 +10,9 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
     <!-- Background backup runs as a foreground data-sync service so long
          transfers aren't killed under Doze. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

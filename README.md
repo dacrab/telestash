@@ -1,12 +1,12 @@
 # TeleStash
 
-A Google Photos–style gallery app that stores your photos and videos in **Telegram** — free, unlimited, and private.
+A Google Photos–style gallery app that stores your photos and videos in your Telegram account.
 
 ## The idea
 
-Google Photos ended free unlimited storage. Telegram gives every account unlimited cloud storage for files sent to yourself. TeleStash connects the two: it backs up your camera roll to your own Telegram "Saved Messages" and turns it back into a beautiful, familiar photo gallery.
+Google Photos ended free unlimited storage. Telegram provides cloud storage for files sent to yourself. TeleStash connects the two: it backs up your camera roll to your own Telegram "Saved Messages" and turns it back into a beautiful, familiar photo gallery.
 
-Everything stays **yours** — your Telegram account, your files, no middleman server, no tracking.
+TeleStash uses your Telegram account directly; there is no middleman server.
 
 ## What it does
 
@@ -15,7 +15,7 @@ Everything stays **yours** — your Telegram account, your files, no middleman s
 - **Albums** — organize photos into albums; select a bunch and move them in one tap.
 - **Multi-select** — long-press to select, then download or delete in bulk.
 - **Upload without quality loss** — photos and videos are sent as original files, so Telegram never re-compresses them.
-- **Private by design** — everything runs on your phone and talks only to Telegram. The local cache is encrypted.
+- **Local data** — Room metadata and temporary upload staging stay in app-private storage, not separately encrypted by TeleStash. TDLib's local database key is wrapped by Android Keystore.
 
 ## Getting started
 
@@ -30,7 +30,7 @@ Everything stays **yours** — your Telegram account, your files, no middleman s
 2. Open **API development tools**
 3. Create an app (any name works) and copy the `api_id` and `api_hash`
 
-These are only stored on your device.
+The app stores these credentials locally and sends them to Telegram to authenticate your app.
 
 ## Building from source
 
@@ -38,8 +38,9 @@ Requirements: JDK 17+, Android SDK 37.
 
 ```bash
 ./gradlew assembleDebug
-# APK: app/build/outputs/apk/debug/app-debug.apk
 ```
+
+The APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 Or open the project in Android Studio and press Run.
 

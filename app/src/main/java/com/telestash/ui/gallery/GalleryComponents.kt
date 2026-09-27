@@ -44,6 +44,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -76,53 +82,83 @@ private sealed interface Resolved {
         val path: String,
     ) : Resolved
 
+    data class Mini(
+        val bytes: ByteArray,
+    ) : Resolved
+
     data object Failed : Resolved
 
     /** Video with no downloadable thumbnail: badge tile instead of a spinner. */
     data object VideoBadge : Resolved
 }
 
-/**
- * Resolves the local file for an item through the gated [MediaPipeline].
- *
- * Grid cells pass [thumbOnly] so videos never pull whole files just to fill a
- * 110dp cell: they get their tiny TDLib thumbnail (or a badge tile), while
- * photos prefer the cached full file, then the thumbnail, then the full file.
- */
+@Suppress("CyclomaticComplexMethod")
 @Composable
 private fun rememberLocalPath(
     item: StashItem,
     thumbOnly: Boolean,
     retryTick: Int = 0,
 ): Resolved {
-    var resolved by remember(item.fileId, item.localPath, thumbOnly) {
+    var resolved by remember(
+        item.fileId,
+        item.thumbFileId,
+        item.localPath,
+        item.miniJpeg,
+        thumbOnly,
+    ) {
         mutableStateOf<Resolved>(Resolved.Loading)
     }
-    LaunchedEffect(item.fileId, item.localPath, thumbOnly, retryTick) {
-        resolved = Resolved.Loading
-        val local = item.localPath?.takeIf { File(it).exists() }
+    LaunchedEffect(
+        item.fileId,
+        item.thumbFileId,
+        item.localPath,
+        item.miniJpeg,
+        thumbOnly,
+        retryTick,
+    ) {
+        val mini = item.miniJpeg
+        resolved = if (thumbOnly && mini != null) Resolved.Mini(mini) else Resolved.Loading
+        val local =
+            item.localPath?.takeIf {
+                (!thumbOnly || !item.isVideo) && File(it).exists()
+            }
         if (local != null) {
             resolved = Resolved.Ready(local)
             return@LaunchedEffect
         }
         val client = TgClient.peek()
         if (thumbOnly && item.isVideo) {
-            // Never pull whole videos for a grid cell.
-            val thumb = MediaPipeline.resolve(client, item.thumbFileId)
-            resolved = if (thumb != null) Resolved.Ready(thumb) else Resolved.VideoBadge
+            val thumb =
+                if (item.thumbFileId != 0) {
+                    MediaPipeline.resolve(client, item.thumbFileId, fullFile = false)
+                } else {
+                    null
+                }
+            resolved =
+                when {
+                    thumb != null -> Resolved.Ready(thumb)
+                    mini != null -> Resolved.Mini(mini)
+                    else -> Resolved.VideoBadge
+                }
             return@LaunchedEffect
         }
-        val target = if (thumbOnly && item.thumbFileId != 0) item.thumbFileId else item.fileId
-        val path = MediaPipeline.resolve(client, target)
-        if (path != null) {
-            resolved = Resolved.Ready(path)
-        } else if (thumbOnly && !item.isVideo && target != item.fileId) {
-            // Thumbnail fetch failed; the full file may still work.
-            val full = MediaPipeline.resolve(client, item.fileId)
-            resolved = if (full != null) Resolved.Ready(full) else Resolved.Failed
-        } else {
-            resolved = Resolved.Failed
+        val thumb =
+            if (thumbOnly && item.thumbFileId != 0) {
+                MediaPipeline.resolve(client, item.thumbFileId, fullFile = false)
+            } else {
+                null
+            }
+        if (thumb != null) {
+            resolved = Resolved.Ready(thumb)
+            return@LaunchedEffect
         }
+        val full = MediaPipeline.resolve(client, item.fileId, fullFile = true)
+        resolved =
+            when {
+                full != null -> Resolved.Ready(full)
+                thumbOnly && mini != null -> Resolved.Mini(mini)
+                else -> Resolved.Failed
+            }
     }
     return resolved
 }
@@ -134,16 +170,34 @@ fun StashImage(
     contentScale: ContentScale = ContentScale.Crop,
     zoomable: Boolean = false,
     thumbOnly: Boolean = false,
+    allowRetry: Boolean = true,
+    contentDescription: String? = item.fileName,
 ) {
     val context = LocalContext.current
-    var retryTick by remember(item.fileId, thumbOnly) { mutableIntStateOf(0) }
+    var retryTick by remember(
+        item.fileId,
+        item.thumbFileId,
+        item.localPath,
+        item.miniJpeg,
+        thumbOnly,
+    ) { mutableIntStateOf(0) }
     val resolved = rememberLocalPath(item, thumbOnly, retryTick)
     var decodeFailed by remember(item.fileId, thumbOnly, resolved) { mutableStateOf(false) }
 
     when (resolved) {
+        is Resolved.Mini ->
+            AsyncImage(
+                model = resolved.bytes,
+                contentDescription = contentDescription,
+                contentScale = contentScale,
+                modifier = Modifier.fillMaxSize(),
+            )
         is Resolved.Ready ->
             if (decodeFailed) {
-                PreviewErrorTile(onRetry = { retryTick++ })
+                PreviewErrorTile(
+                    onRetry = if (allowRetry) ({ retryTick++ }) else null,
+                    contentDescription = if (allowRetry) "Preview unavailable, tap to retry" else null,
+                )
             } else {
                 val imageModifier =
                     if (zoomable) {
@@ -162,14 +216,12 @@ fun StashImage(
                                 .crossfade(true)
                         if (thumbOnly) {
                             builder.size(GRID_CELL_DECODE_SIZE, GRID_CELL_DECODE_SIZE)
-                        } else {
-                            builder
                         }
                         builder.build()
                     }
                 AsyncImage(
                     model = request,
-                    contentDescription = item.fileName,
+                    contentDescription = contentDescription,
                     contentScale = contentScale,
                     modifier = imageModifier,
                     onError = { decodeFailed = true },
@@ -178,10 +230,9 @@ fun StashImage(
         is Resolved.Loading -> {
             val mini = item.miniJpeg
             if (mini != null) {
-                // Bytes Telegram already sent: zero-network instant placeholder.
                 AsyncImage(
                     model = mini,
-                    contentDescription = item.fileName,
+                    contentDescription = contentDescription,
                     contentScale = contentScale,
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -189,24 +240,32 @@ fun StashImage(
                 Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant))
             }
         }
-        is Resolved.Failed -> PreviewErrorTile(onRetry = { retryTick++ })
-        is Resolved.VideoBadge -> VideoBadgeTile()
+        is Resolved.Failed ->
+            PreviewErrorTile(
+                onRetry = if (allowRetry) ({ retryTick++ }) else null,
+                contentDescription = if (allowRetry) "Preview unavailable, tap to retry" else null,
+            )
+        is Resolved.VideoBadge -> VideoBadgeTile(contentDescription)
     }
 }
 
 /** Centered broken-image tile; tapping retries the download in place. */
 @Composable
-private fun PreviewErrorTile(onRetry: () -> Unit) {
+private fun PreviewErrorTile(
+    onRetry: (() -> Unit)?,
+    contentDescription: String? = "Preview unavailable, tap to retry",
+) {
+    val retryModifier = if (onRetry != null) Modifier.clickable(onClick = onRetry) else Modifier
     Box(
         Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClick = onRetry),
+            .then(retryModifier),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             Icons.Filled.BrokenImage,
-            contentDescription = "Preview unavailable, tap to retry",
+            contentDescription = contentDescription,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(28.dp),
         )
@@ -215,7 +274,7 @@ private fun PreviewErrorTile(onRetry: () -> Unit) {
 
 /** Dark tile with a play glyph for videos that have no thumbnail (yet). */
 @Composable
-private fun VideoBadgeTile() {
+private fun VideoBadgeTile(contentDescription: String?) {
     Box(
         Modifier
             .fillMaxSize()
@@ -224,7 +283,7 @@ private fun VideoBadgeTile() {
     ) {
         Icon(
             Icons.Filled.PlayArrow,
-            contentDescription = "Video",
+            contentDescription = contentDescription,
             tint = Color.White.copy(alpha = 0.9f),
             modifier = Modifier.size(32.dp),
         )
@@ -300,9 +359,20 @@ fun VideoPlayer(
 fun GalleryCell(
     item: StashItem,
     selected: Boolean = false,
+    selectionMode: Boolean = false,
     onClick: () -> Unit = {},
     onLongClick: () -> Unit = {},
 ) {
+    val type = if (item.isVideo) "Video" else "Photo"
+    val description =
+        buildString {
+            append(type)
+            append(", ")
+            append(Format.date(item.date))
+            append(", ")
+            append(item.fileName)
+            if (selected) append(", selected")
+        }
     Box(
         Modifier
             .fillMaxSize()
@@ -311,6 +381,7 @@ fun GalleryCell(
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick,
+                role = if (selectionMode) Role.Checkbox else null,
             ).then(
                 if (selected) {
                     Modifier.background(
@@ -319,13 +390,32 @@ fun GalleryCell(
                 } else {
                     Modifier
                 },
-            ),
+            ).semantics(mergeDescendants = true) {
+                contentDescription = description
+                this.selected = selected
+                customActions =
+                    if (selectionMode) {
+                        listOf(
+                            CustomAccessibilityAction(if (selected) "Deselect" else "Select") {
+                                onClick()
+                                true
+                            },
+                        )
+                    } else {
+                        emptyList()
+                    }
+            },
     ) {
-        StashImage(item, thumbOnly = true)
+        StashImage(
+            item,
+            thumbOnly = true,
+            allowRetry = false,
+            contentDescription = null,
+        )
         if (item.isVideo) {
             Icon(
                 Icons.Filled.PlayArrow,
-                contentDescription = "Video",
+                contentDescription = null,
                 tint = Color.White.copy(alpha = 0.9f),
                 modifier =
                     Modifier
@@ -338,7 +428,7 @@ fun GalleryCell(
         if (selected) {
             Icon(
                 Icons.Filled.CheckCircle,
-                contentDescription = "Selected",
+                contentDescription = null,
                 tint = MaterialTheme.colorScheme.primary,
                 modifier =
                     Modifier
@@ -350,7 +440,7 @@ fun GalleryCell(
         if (item.deviceUri != null) {
             Icon(
                 Icons.Filled.CloudDone,
-                contentDescription = "Backed up from device",
+                contentDescription = null,
                 tint = Color.White.copy(alpha = 0.9f),
                 modifier =
                     Modifier
@@ -373,12 +463,17 @@ fun PhotoViewerDialog(
     onDelete: (StashItem) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    if (items.isEmpty()) {
+        LaunchedEffect(Unit) { onDismiss() }
+        return
+    }
+    val safeInitialIndex = initialIndex.coerceIn(0, items.lastIndex)
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        val pagerState = rememberPagerState(initialPage = initialIndex) { items.size }
-        var current by remember { mutableStateOf(items.getOrElse(initialIndex) { items.first() }) }
+        val pagerState = rememberPagerState(initialPage = safeInitialIndex) { items.size }
+        var current by remember { mutableStateOf(items[safeInitialIndex]) }
 
         // System back dismisses the viewer (and stops video playback).
         androidx.activity.compose.BackHandler(onBack = onDismiss)
@@ -434,7 +529,7 @@ fun PhotoViewerDialog(
                         Icon(
                             Icons.Filled.Delete,
                             contentDescription = "Delete",
-                            tint = MaterialTheme.colorScheme.error,
+                            tint = Color.White,
                         )
                     }
                 }
@@ -459,7 +554,9 @@ fun PhotoViewerDialog(
                             StashImage(
                                 item,
                                 contentScale = ContentScale.Fit,
-                                zoomable = true,
+                                zoomable = pagerState.currentPage == page,
+                                thumbOnly = pagerState.currentPage != page,
+                                allowRetry = true,
                             )
                         }
                     }

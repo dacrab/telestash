@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -21,11 +22,14 @@ private object Keys {
     val AUTO_BACKUP = booleanPreferencesKey("auto_backup_enabled")
     val WIFI_ONLY = booleanPreferencesKey("backup_wifi_only")
     val CHARGING_ONLY = booleanPreferencesKey("backup_charging_only")
-    val BACKUP_FOLDERS = stringPreferencesKey("backup_folders")
+    val LEGACY_BACKUP_FOLDERS = stringPreferencesKey("backup_folders")
+    val BACKUP_FOLDERS = stringSetPreferencesKey("backup_folders_v2")
     val DEDUPE = booleanPreferencesKey("dedupe_enabled")
+    val REMOTE_DEDUPE = booleanPreferencesKey("remote_dedupe_enabled")
     val INSTANT_UPLOAD = booleanPreferencesKey("instant_upload_enabled")
     val SYNC_NEWEST = longPreferencesKey("sync_newest_message_id")
     val SYNC_OLDEST = longPreferencesKey("sync_oldest_message_id")
+    val TELEGRAM_USER_ID = longPreferencesKey("telegram_user_id")
 }
 
 class SettingsRepository(
@@ -52,18 +56,22 @@ class SettingsRepository(
     val wifiOnly: Flow<Boolean> = context.settings.data.map { it[Keys.WIFI_ONLY] ?: true }
     val chargingOnly: Flow<Boolean> = context.settings.data.map { it[Keys.CHARGING_ONLY] ?: false }
 
-    /** Comma-separated MediaStore bucket names; empty = all folders. */
     val backupFolders: Flow<Set<String>> =
-        context.settings.data.map { p ->
-            (p[Keys.BACKUP_FOLDERS] ?: "")
-                .split(",")
-                .map { it.trim() }
-                .filter { it.isNotBlank() }
-                .toSet()
+        context.settings.data.map { preferences ->
+            preferences[Keys.BACKUP_FOLDERS]?.toSet()
+                ?: preferences[Keys.LEGACY_BACKUP_FOLDERS]
+                    .orEmpty()
+                    .split(",")
+                    .map(String::trim)
+                    .filter(String::isNotBlank)
+                    .toSet()
         }
 
     suspend fun setBackupFolders(folders: Set<String>) {
-        context.settings.edit { it[Keys.BACKUP_FOLDERS] = folders.joinToString(",") }
+        context.settings.edit { preferences ->
+            preferences[Keys.BACKUP_FOLDERS] = folders.toSet()
+            preferences.remove(Keys.LEGACY_BACKUP_FOLDERS)
+        }
     }
 
     val dedupeEnabled: Flow<Boolean> = context.settings.data.map { it[Keys.DEDUPE] ?: true }
@@ -77,6 +85,13 @@ class SettingsRepository(
 
     suspend fun setDedupeEnabled(enabled: Boolean) {
         context.settings.edit { it[Keys.DEDUPE] = enabled }
+    }
+
+    val remoteDedupeEnabled: Flow<Boolean> =
+        context.settings.data.map { it[Keys.REMOTE_DEDUPE] ?: false }
+
+    suspend fun setRemoteDedupeEnabled(enabled: Boolean) {
+        context.settings.edit { it[Keys.REMOTE_DEDUPE] = enabled }
     }
 
     /** Newest/oldest message ids captured by the last full gallery sync. */
@@ -94,15 +109,28 @@ class SettingsRepository(
         }
     }
 
-    suspend fun setAutoBackup(enabled: Boolean) {
-        context.settings.edit { it[Keys.AUTO_BACKUP] = enabled }
+    suspend fun clearSyncWatermarks() {
+        context.settings.edit {
+            it.remove(Keys.SYNC_NEWEST)
+            it.remove(Keys.SYNC_OLDEST)
+        }
     }
 
-    suspend fun setWifiOnly(wifi: Boolean) {
-        context.settings.edit { it[Keys.WIFI_ONLY] = wifi }
+    suspend fun telegramUserId(): Long = context.settings.data.first()[Keys.TELEGRAM_USER_ID] ?: 0L
+
+    suspend fun setTelegramUserId(userId: Long) {
+        context.settings.edit { it[Keys.TELEGRAM_USER_ID] = userId }
     }
 
-    suspend fun setChargingOnly(charging: Boolean) {
-        context.settings.edit { it[Keys.CHARGING_ONLY] = charging }
+    suspend fun setBackupPreferences(
+        enabled: Boolean,
+        wifiOnly: Boolean,
+        chargingOnly: Boolean,
+    ) {
+        context.settings.edit { preferences ->
+            preferences[Keys.AUTO_BACKUP] = enabled
+            preferences[Keys.WIFI_ONLY] = wifiOnly
+            preferences[Keys.CHARGING_ONLY] = chargingOnly
+        }
     }
 }

@@ -4,7 +4,6 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
-import androidx.core.content.edit
 import java.security.KeyStore
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -25,30 +24,30 @@ object DbKeyStore {
     private const val GCM_IV_BYTES = 12
     private const val GCM_TAG_BITS = 128
 
-    /**
-     * Returns the raw TDLib database encryption key (64 random bytes), generating
-     * it on first call. If the wrapped copy no longer decrypts (Keystore entry
-     * invalidated by a lock-screen/OS change), it is discarded and replaced.
-     */
+    @Suppress("UseKtx")
     @Synchronized
     fun tdlibKey(context: Context): ByteArray {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val stored = prefs.getString(PREF_KEY, null)
         if (stored == null) {
             val fresh = ByteArray(TDLIB_KEY_BYTES).also { SecureRandom().nextBytes(it) }
-            prefs.edit { putString(PREF_KEY, wrap(fresh)) }
+            val wrapped = wrap(fresh)
+            check(prefs.edit().putString(PREF_KEY, wrapped).commit()) {
+                "Could not persist TDLib database key"
+            }
             return fresh
         }
-        return runCatching { unwrap(stored) }.getOrElse {
-            val fresh = ByteArray(TDLIB_KEY_BYTES).also { SecureRandom().nextBytes(it) }
-            prefs.edit { putString(PREF_KEY, wrap(fresh)) }
-            fresh
+        return try {
+            unwrap(stored)
+        } catch (e: Exception) {
+            throw IllegalStateException("Could not unwrap stored TDLib database key", e)
         }
     }
 
-    private fun keystoreKey(): SecretKey {
+    private fun keystoreKey(createIfMissing: Boolean = true): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (ks.getEntry(KS_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+        if (!createIfMissing) error("TDLib Keystore key is missing")
 
         val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
         kg.init(
@@ -78,7 +77,11 @@ object DbKeyStore {
         val iv = all.copyOfRange(0, GCM_IV_BYTES)
         val ct = all.copyOfRange(GCM_IV_BYTES, all.size)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, keystoreKey(), GCMParameterSpec(GCM_TAG_BITS, iv))
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            keystoreKey(createIfMissing = false),
+            GCMParameterSpec(GCM_TAG_BITS, iv),
+        )
         return cipher.doFinal(ct)
     }
 }
