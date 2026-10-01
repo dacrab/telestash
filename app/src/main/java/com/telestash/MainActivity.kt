@@ -9,26 +9,17 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.ui.TeleStashApp
 import com.telestash.ui.theme.TeleStashTheme
-import org.drinkless.tdlib.Client
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        // Forcing TDLib class init + native library load on the main thread exactly
-        // once, so background threads can't race Client.create() and deadlock.
-        runCatching {
-            Client.execute(
-                org.drinkless.tdlib.TdApi
-                    .SetLogVerbosityLevel(0),
-            )
-        }
         val vm: AppViewModel by viewModels()
         setContent {
             TeleStashTheme {
-                val state = vm.auth.collectAsStateWithLifecycle()
+                val authState = vm.auth.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) { vm.start() }
-                TeleStashApp(vm, state)
+                TeleStashApp(vm, authState)
             }
         }
     }

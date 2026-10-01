@@ -29,6 +29,7 @@ class NewMediaWatcher(
     private val onNewMedia: (pending: List<PendingMedia>, autoUpload: Boolean) -> Unit,
 ) {
     companion object {
+        /** A camera write lands in MediaStore in bursts; wait for it to settle. */
         private const val DEBOUNCE_MS = 2_500L
     }
 
@@ -48,16 +49,9 @@ class NewMediaWatcher(
                 }
             }
         observer = o
-        context.contentResolver.registerContentObserver(
-            DeviceMedia.imageCollection(),
-            true,
-            o,
-        )
-        context.contentResolver.registerContentObserver(
-            DeviceMedia.videoCollection(),
-            true,
-            o,
-        )
+        val resolver = context.contentResolver
+        resolver.registerContentObserver(DeviceMedia.imageCollection(), true, o)
+        resolver.registerContentObserver(DeviceMedia.videoCollection(), true, o)
         launchScan()
     }
 
@@ -69,29 +63,29 @@ class NewMediaWatcher(
         current?.let { context.contentResolver.unregisterContentObserver(it) }
     }
 
-    private fun launchScan(delayMs: Long? = null) {
+    private fun launchScan(debounceMs: Long = 0L) {
         debounceJob?.cancel()
         debounceJob =
-            scope.launch(Dispatchers.Default) {
-                delayMs?.let { delay(it) }
-                scanPending()
+            scope.launch(Dispatchers.IO) {
+                delay(debounceMs)
+                notifyPending()
             }
     }
 
-    private suspend fun scanPending() {
+    private suspend fun notifyPending() {
         try {
-            notifyPending()
+            // Without a live client there is nothing to back up to yet; the
+            // next start() re-scans.
+            if (TgClient.peek() == null) return
+            val dao = StashDbHolder.db(context).itemDao()
+            val settings = SettingsRepository(context)
+            val pending = BackupEngine.pending(context, dao, settings.backupFolders.first())
+            onNewMedia(pending, settings.instantUpload.first())
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
+            // A MediaStore query can fail on transient provider errors; the
+            // periodic backup pass still covers anything this scan missed.
         }
-    }
-
-    private suspend fun notifyPending() {
-        if (TgClient.peek() == null) return
-        val dao = StashDbHolder.db(context).itemDao()
-        val settings = SettingsRepository(context)
-        val pending = BackupEngine.pending(context, dao, settings.backupFolders.first())
-        onNewMedia(pending, settings.instantUpload.first())
     }
 }

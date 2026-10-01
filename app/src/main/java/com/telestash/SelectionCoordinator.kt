@@ -27,27 +27,13 @@ internal class SelectionCoordinator(
     private val indexRemote: suspend (List<TdApi.Message>, Long) -> Unit,
     private val toast: (String) -> Unit,
 ) {
-    fun download(item: StashItem): Job = downloadItems(listOf(item))
+    fun download(item: StashItem): Job = launchIo { downloadItems(listOf(item)) }
 
-    fun downloadSelected() {
-        val ids = gallery.value.selected ?: return
-        if (ids.isEmpty()) return
-        scope.launch(Dispatchers.IO) {
-            val items = resolveSelectedItems(ids)
-            if (items.isNotEmpty()) downloadItemsInCurrentScope(items)
-        }
-    }
+    fun downloadSelected() = launchIo { downloadItems(selectedItems()) }
 
-    fun delete(item: StashItem): Job = deleteItems(listOf(item))
+    fun delete(item: StashItem): Job = launchIo { deleteItems(listOf(item)) }
 
-    fun deleteSelected() {
-        val ids = gallery.value.selected ?: return
-        if (ids.isEmpty()) return
-        scope.launch(Dispatchers.IO) {
-            val items = resolveSelectedItems(ids)
-            if (items.isNotEmpty()) deleteItemsInCurrentScope(items)
-        }
-    }
+    fun deleteSelected() = launchIo { deleteItems(selectedItems()) }
 
     fun addSelectedToAlbum(
         albumTopicId: Long,
@@ -105,22 +91,16 @@ internal class SelectionCoordinator(
         if (ids.isNotEmpty()) toast("Selected ${ids.size} loaded items")
     }
 
-    private fun downloadItems(items: List<StashItem>): Job =
-        scope.launch(Dispatchers.IO) {
-            downloadItemsInCurrentScope(items)
-        }
-
-    private fun deleteItems(items: List<StashItem>): Job =
-        scope.launch(Dispatchers.IO) {
-            deleteItemsInCurrentScope(items)
-        }
-
-    private suspend fun resolveSelectedItems(ids: Set<Long>): List<StashItem> {
+    /** The current selection resolved to items, or empty when nothing is selected. */
+    private suspend fun selectedItems(): List<StashItem> {
+        val ids = gallery.value.selected ?: return emptyList()
         if (ids.isEmpty()) return emptyList()
         return dao.itemsByIds(ids.toList()).map { it.toStashItem() }
     }
 
-    private suspend fun downloadItemsInCurrentScope(items: List<StashItem>) {
+    private fun launchIo(block: suspend CoroutineScope.() -> Unit): Job = scope.launch(Dispatchers.IO, block = block)
+
+    private suspend fun downloadItems(items: List<StashItem>) {
         if (items.isEmpty()) return
         val c = client() ?: return
         var saved = 0
@@ -130,7 +110,7 @@ internal class SelectionCoordinator(
         val failed = items.size - saved
         toast(
             when {
-                saved == 1 && items.size == 1 -> "Saved to gallery"
+                items.size == 1 -> "Saved to gallery"
                 failed == 0 -> "Saved $saved items to gallery"
                 else -> "Saved $saved of ${items.size} items to gallery"
             },
@@ -152,7 +132,7 @@ internal class SelectionCoordinator(
             false
         }
 
-    private suspend fun deleteItemsInCurrentScope(items: List<StashItem>) {
+    private suspend fun deleteItems(items: List<StashItem>) {
         if (items.isEmpty()) return
         val c = client() ?: return
         try {

@@ -1,16 +1,15 @@
 package com.telestash.backup
 
 import android.content.Context
-import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
-import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
-import com.telestash.data.ItemDao
+import com.telestash.AccountGuard
+import com.telestash.BackupScheduler
 import com.telestash.data.SettingsRepository
 import com.telestash.data.StashDbHolder
 import com.telestash.td.TdException
@@ -54,7 +53,9 @@ class BackupWorker(
             val dao = StashDbHolder.db(applicationContext).itemDao()
             val accountId =
                 try {
-                    prepareAccount(client, settings, dao)
+                    val (userId, reset) = AccountGuard.ensureOwnedBy(client, settings, dao)
+                    if (reset) BackupEngine.invalidateRemoteIndexCache()
+                    userId
                 } catch (e: TdException) {
                     if (e.isFloodWait) {
                         scheduleFloodRetry(e.floodWaitSeconds)
@@ -94,41 +95,37 @@ class BackupWorker(
 
     private suspend fun startForeground(total: Int): Boolean {
         BackupNotifications.ensureChannel(applicationContext)
-        try {
-            setForeground(
-                ForegroundInfo(
-                    BackupNotifications.NOTIFICATION_ID,
-                    BackupNotifications.progress(applicationContext, 0, total),
-                ),
-            )
-            return true
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            return false
-        }
+        return postProgress(0, total)
     }
 
-    /** Refresh the notification at most a few times per run, not once per item. */
+    /**
+     * Refreshes the notification at most every few items, not once per item:
+     * a 500-item backup would otherwise post 500 system notifications.
+     */
     private suspend fun updateProgress(
         done: Int,
         total: Int,
     ) {
-        if (done == total || done % PROGRESS_NOTIFY_EVERY == 0) {
-            BackupNotifications.ensureChannel(applicationContext)
-            try {
-                setForeground(
-                    ForegroundInfo(
-                        BackupNotifications.NOTIFICATION_ID,
-                        BackupNotifications.progress(applicationContext, done, total),
-                    ),
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-            }
-        }
+        if (done == total || done % PROGRESS_NOTIFY_EVERY == 0) postProgress(done, total)
     }
+
+    private suspend fun postProgress(
+        done: Int,
+        total: Int,
+    ): Boolean =
+        try {
+            setForeground(
+                ForegroundInfo(
+                    BackupNotifications.NOTIFICATION_ID,
+                    BackupNotifications.progress(applicationContext, done, total),
+                ),
+            )
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            false
+        }
 
     /** One-shot pass that starts after the server's requested flood-wait. */
     private suspend fun scheduleFloodRetry(floodWaitSeconds: Long) {
@@ -144,49 +141,11 @@ class BackupWorker(
     private suspend fun oneTimeRequest(
         settings: SettingsRepository,
         initialDelaySeconds: Long,
-    ): OneTimeWorkRequest {
-        val networkType =
-            if (settings.wifiOnly.first()) NetworkType.UNMETERED else NetworkType.CONNECTED
-        val constraints =
-            Constraints
-                .Builder()
-                .setRequiredNetworkType(networkType)
-                .setRequiresCharging(settings.chargingOnly.first())
-                .build()
-        return OneTimeWorkRequestBuilder<BackupWorker>()
+    ): OneTimeWorkRequest =
+        OneTimeWorkRequestBuilder<BackupWorker>()
             .setInitialDelay(initialDelaySeconds, TimeUnit.SECONDS)
-            .setConstraints(constraints)
+            .setConstraints(BackupScheduler.constraints(settings.wifiOnly.first(), settings.chargingOnly.first()))
             .build()
-    }
-
-    /**
-     * A usable TDLib client: the running one, or a fresh session restored from
-     * the local database (no login needed once authorized). Null when there are
-     * no stored credentials or Telegram wants an interactive login.
-     */
-    private suspend fun prepareAccount(
-        client: TgClient,
-        settings: SettingsRepository,
-        dao: ItemDao,
-    ): Long {
-        val userId = client.currentUserId()
-        val previousUserId = settings.telegramUserId()
-        val unownedData =
-            previousUserId == 0L &&
-                (
-                    dao.hasGalleryItems() ||
-                        dao.hasRemoteMedia() ||
-                        dao.allContentHashes().isNotEmpty() ||
-                        dao.allUploadedHashes().isNotEmpty()
-                )
-        if (unownedData || (previousUserId != 0L && previousUserId != userId)) {
-            dao.clearAllAccountData()
-            BackupEngine.invalidateRemoteIndexCache()
-            settings.clearSyncWatermarks()
-        }
-        settings.setTelegramUserId(userId)
-        return userId
-    }
 
     private suspend fun ensureTdlib(): TgClient? {
         val settings = SettingsRepository(applicationContext)

@@ -22,8 +22,7 @@ private object Keys {
     val AUTO_BACKUP = booleanPreferencesKey("auto_backup_enabled")
     val WIFI_ONLY = booleanPreferencesKey("backup_wifi_only")
     val CHARGING_ONLY = booleanPreferencesKey("backup_charging_only")
-    val LEGACY_BACKUP_FOLDERS = stringPreferencesKey("backup_folders")
-    val BACKUP_FOLDERS = stringSetPreferencesKey("backup_folders_v2")
+    val BACKUP_FOLDERS = stringSetPreferencesKey("backup_folders")
     val DEDUPE = booleanPreferencesKey("dedupe_enabled")
     val REMOTE_DEDUPE = booleanPreferencesKey("remote_dedupe_enabled")
     val INSTANT_UPLOAD = booleanPreferencesKey("instant_upload_enabled")
@@ -32,94 +31,83 @@ private object Keys {
     val TELEGRAM_USER_ID = longPreferencesKey("telegram_user_id")
 }
 
+/** User preferences and the stored Telegram app credentials. */
 class SettingsRepository(
-    private val context: Context,
+    context: Context,
 ) {
-    private val credentials: Flow<Pair<Int, String>> =
-        context.settings.data.map { p ->
-            (p[Keys.API_ID] ?: 0) to (p[Keys.API_HASH] ?: "")
-        }
+    private val store = context.settings
+    private val data = store.data
 
-    suspend fun credentialsOnce(): Pair<Int, String> = credentials.first()
+    suspend fun credentialsOnce(): Pair<Int, String> =
+        data.first().let { (it[Keys.API_ID] ?: 0) to (it[Keys.API_HASH] ?: "") }
 
     suspend fun setCredentials(
         apiId: Int,
         apiHash: String,
     ) {
-        context.settings.edit {
+        store.edit {
             it[Keys.API_ID] = apiId
             it[Keys.API_HASH] = apiHash
         }
     }
 
-    val autoBackup: Flow<Boolean> = context.settings.data.map { it[Keys.AUTO_BACKUP] ?: false }
-    val wifiOnly: Flow<Boolean> = context.settings.data.map { it[Keys.WIFI_ONLY] ?: true }
-    val chargingOnly: Flow<Boolean> = context.settings.data.map { it[Keys.CHARGING_ONLY] ?: false }
+    val autoBackup: Flow<Boolean> = data.map { it[Keys.AUTO_BACKUP] ?: false }
+    val wifiOnly: Flow<Boolean> = data.map { it[Keys.WIFI_ONLY] ?: true }
+    val chargingOnly: Flow<Boolean> = data.map { it[Keys.CHARGING_ONLY] ?: false }
 
-    val backupFolders: Flow<Set<String>> =
-        context.settings.data.map { preferences ->
-            preferences[Keys.BACKUP_FOLDERS]?.toSet()
-                ?: preferences[Keys.LEGACY_BACKUP_FOLDERS]
-                    .orEmpty()
-                    .split(",")
-                    .map(String::trim)
-                    .filter(String::isNotBlank)
-                    .toSet()
-        }
+    /** Empty means "every folder", which is the default on a fresh install. */
+    val backupFolders: Flow<Set<String>> = data.map { it[Keys.BACKUP_FOLDERS] ?: emptySet() }
 
     suspend fun setBackupFolders(folders: Set<String>) {
-        context.settings.edit { preferences ->
-            preferences[Keys.BACKUP_FOLDERS] = folders.toSet()
-            preferences.remove(Keys.LEGACY_BACKUP_FOLDERS)
-        }
+        store.edit { it[Keys.BACKUP_FOLDERS] = folders }
     }
 
-    val dedupeEnabled: Flow<Boolean> = context.settings.data.map { it[Keys.DEDUPE] ?: true }
+    val dedupeEnabled: Flow<Boolean> = data.map { it[Keys.DEDUPE] ?: true }
 
     /** Upload newly detected media immediately instead of waiting for the periodic pass. */
-    val instantUpload: Flow<Boolean> = context.settings.data.map { it[Keys.INSTANT_UPLOAD] ?: false }
+    val instantUpload: Flow<Boolean> = data.map { it[Keys.INSTANT_UPLOAD] ?: false }
 
     suspend fun setInstantUpload(enabled: Boolean) {
-        context.settings.edit { it[Keys.INSTANT_UPLOAD] = enabled }
+        store.edit { it[Keys.INSTANT_UPLOAD] = enabled }
     }
 
     suspend fun setDedupeEnabled(enabled: Boolean) {
-        context.settings.edit { it[Keys.DEDUPE] = enabled }
+        store.edit { it[Keys.DEDUPE] = enabled }
     }
 
     val remoteDedupeEnabled: Flow<Boolean> =
-        context.settings.data.map { it[Keys.REMOTE_DEDUPE] ?: false }
+        data.map { it[Keys.REMOTE_DEDUPE] ?: false }
 
     suspend fun setRemoteDedupeEnabled(enabled: Boolean) {
-        context.settings.edit { it[Keys.REMOTE_DEDUPE] = enabled }
+        store.edit { it[Keys.REMOTE_DEDUPE] = enabled }
     }
 
     /** Newest/oldest message ids captured by the last full gallery sync. */
-    suspend fun lastSyncedNewestId(): Long = context.settings.data.first()[Keys.SYNC_NEWEST] ?: 0L
+    suspend fun lastSyncedNewestId(): Long = data.first()[Keys.SYNC_NEWEST] ?: 0L
 
-    suspend fun lastSyncedOldestId(): Long = context.settings.data.first()[Keys.SYNC_OLDEST] ?: Long.MAX_VALUE
+    suspend fun lastSyncedOldestId(): Long = data.first()[Keys.SYNC_OLDEST] ?: Long.MAX_VALUE
 
     suspend fun setSyncWatermark(
         newest: Long,
         oldest: Long,
     ) {
-        context.settings.edit {
+        store.edit {
             it[Keys.SYNC_NEWEST] = newest
             it[Keys.SYNC_OLDEST] = oldest
         }
     }
 
     suspend fun clearSyncWatermarks() {
-        context.settings.edit {
+        store.edit {
             it.remove(Keys.SYNC_NEWEST)
             it.remove(Keys.SYNC_OLDEST)
         }
     }
 
-    suspend fun telegramUserId(): Long = context.settings.data.first()[Keys.TELEGRAM_USER_ID] ?: 0L
+    suspend fun telegramUserId(): Long = data.first()[Keys.TELEGRAM_USER_ID] ?: 0L
 
     suspend fun setTelegramUserId(userId: Long) {
-        context.settings.edit { it[Keys.TELEGRAM_USER_ID] = userId }
+        store.edit { it[Keys.TELEGRAM_USER_ID] = userId }
     }
 
     suspend fun setBackupPreferences(
@@ -127,7 +115,7 @@ class SettingsRepository(
         wifiOnly: Boolean,
         chargingOnly: Boolean,
     ) {
-        context.settings.edit { preferences ->
+        store.edit { preferences ->
             preferences[Keys.AUTO_BACKUP] = enabled
             preferences[Keys.WIFI_ONLY] = wifiOnly
             preferences[Keys.CHARGING_ONLY] = chargingOnly

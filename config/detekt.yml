@@ -5,11 +5,13 @@ complexity:
   LongMethod:
     allowedLines: 120
   LongParameterList:
+    # Data-class constructors and Room/Compose bindings are inherently wide.
     active: false
   TooManyFunctions:
     allowedFunctionsPerFile: 30
     allowedFunctionsPerClass: 50
-    allowedFunctionsPerInterface: 30
+    # One Room DAO legitimately groups every query for the four tables.
+    allowedFunctionsPerInterface: 40
     allowedFunctionsPerObject: 20
     allowedFunctionsPerEnum: 10
 

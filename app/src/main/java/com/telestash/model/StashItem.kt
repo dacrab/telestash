@@ -3,14 +3,25 @@ package com.telestash.model
 import com.telestash.util.FileTypes
 import org.drinkless.tdlib.TdApi
 
+/**
+ * A Saved Messages message parsed once, carrying both the gallery item the UI
+ * renders and the cloud identity the dedupe index needs. Splitting the two
+ * keeps [StashItem] free of fields only one feature reads.
+ */
+internal class ParsedMessage(
+    val item: StashItem,
+    val remoteUniqueId: String?,
+    val remoteFileId: String?,
+    /** TDLib file kind, which decides how a remote file is re-resolved. */
+    val remoteType: String,
+)
+
 /** A media item shown in the gallery, extracted from a Saved Messages message. */
 data class StashItem(
     val messageId: Long,
     val chatId: Long,
     val date: Int,
     val fileId: Int,
-    val remoteUniqueId: String? = null,
-    val remoteFileId: String? = null,
     val fileName: String,
     val sizeBytes: Long,
     val isVideo: Boolean,
@@ -25,111 +36,123 @@ data class StashItem(
     val miniJpeg: ByteArray? = null,
 ) {
     companion object {
-        private val IMAGE_EXTENSIONS =
-            setOf("jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "bmp", "avif")
-
-        fun fromMessage(msg: TdApi.Message): StashItem? {
-            return when (val c = msg.content) {
-                is TdApi.MessageDocument -> {
-                    val name = c.document.fileName.ifBlank { "file" }
-                    // The stash is a photo/video gallery: anything else would
-                    // only ever render as a broken cell.
-                    if (!isGalleryMime(c.document.mimeType, name)) return null
-                    StashItem(
-                        messageId = msg.id,
-                        chatId = msg.chatId,
-                        date = msg.date,
-                        fileId = c.document.document.id,
-                        remoteUniqueId =
-                            c.document.document.remote
-                                ?.uniqueId,
-                        remoteFileId =
-                            c.document.document.remote
-                                ?.id,
-                        fileName = name,
-                        sizeBytes = fileSize(c.document.document),
-                        isVideo = isGalleryVideo(c.document.mimeType, name),
-                        localPath = localPath(c.document.document),
-                        thumbFileId =
-                            c.document.thumbnail
-                                ?.file
-                                ?.id ?: 0,
-                        miniJpeg = c.document.minithumbnail?.data,
-                    )
-                }
-                is TdApi.MessagePhoto -> {
-                    val sizes = c.photo.sizes
-                    if (sizes.isEmpty()) return null
-                    val biggest = sizes.maxBy { it.width * it.height }
-                    val smallest = sizes.minBy { it.width * it.height }
-                    StashItem(
-                        messageId = msg.id,
-                        chatId = msg.chatId,
-                        date = msg.date,
-                        fileId = biggest.photo.id,
-                        remoteUniqueId = biggest.photo.remote?.uniqueId,
-                        remoteFileId = biggest.photo.remote?.id,
-                        fileName = "photo_${msg.id}.jpg",
-                        sizeBytes = fileSize(biggest.photo),
-                        isVideo = false,
-                        localPath = localPath(biggest.photo),
-                        thumbFileId = smallest.photo.id,
-                        miniJpeg = c.photo.minithumbnail?.data,
-                    )
-                }
-                is TdApi.MessageVideo -> {
-                    StashItem(
-                        messageId = msg.id,
-                        chatId = msg.chatId,
-                        date = msg.date,
-                        fileId = c.video.video.id,
-                        remoteUniqueId =
-                            c.video.video.remote
-                                ?.uniqueId,
-                        remoteFileId =
-                            c.video.video.remote
-                                ?.id,
-                        fileName = c.video.fileName.ifBlank { "video_${msg.id}.mp4" },
-                        sizeBytes = fileSize(c.video.video),
-                        isVideo = true,
-                        localPath = localPath(c.video.video),
-                        thumbFileId =
-                            c.video.thumbnail
-                                ?.file
-                                ?.id ?: 0,
-                        miniJpeg = c.video.minithumbnail?.data,
-                    )
-                }
-                else -> null
-            }
-        }
-
-        private fun localPath(file: TdApi.File): String? =
-            file.local
-                ?.path
-                ?.takeIf { file.local?.isDownloadingCompleted == true }
-                ?.takeIf { it.isNotBlank() }
-
-        private fun fileSize(file: TdApi.File): Long = file.size.takeIf { it > 0L } ?: file.expectedSize
-
-        private fun isGalleryVideo(
-            mime: String,
-            name: String,
-        ): Boolean = mime.startsWith("video/") || FileTypes.isVideoName(name)
-
-        /** Accept image/video MIME types and fall back to the filename when blank. */
-        private fun isGalleryMime(
-            mime: String,
-            name: String,
-        ): Boolean {
-            if (mime.startsWith("image/") || mime.startsWith("video/")) return true
-            if (mime.isBlank()) return isGalleryVideo(mime, name) || isStillImageName(name)
-            return false
-        }
-
-        private fun isStillImageName(name: String): Boolean {
-            val ext = name.substringAfterLast('.', "").lowercase()
-            return ext in IMAGE_EXTENSIONS
-        }
+        /** Null when the message holds no photo or video worth showing. */
+        fun fromMessage(message: TdApi.Message): StashItem? = parse(message)?.item
     }
 }
+
+/**
+ * Parses a message into gallery data, or null if it isn't gallery media. The
+ * stash is a photo/video gallery, so anything else (a text note, a PDF) is
+ * skipped rather than rendered as a broken cell.
+ */
+internal fun parse(message: TdApi.Message): ParsedMessage? =
+    when (val content = message.content) {
+        is TdApi.MessageDocument -> {
+            val document = content.document
+            val name = document.fileName.ifBlank { "file" }
+            if (!isGalleryMime(document.mimeType, name)) return null
+            ParsedMessage(
+                item =
+                    item(
+                        message = message,
+                        file = document.document,
+                        name = name,
+                        isVideo = document.mimeType.startsWith("video/") || name.isVideoName(),
+                        thumbFileId = document.thumbnail?.file?.id ?: 0,
+                        miniJpeg = document.minithumbnail?.data,
+                    ),
+                remoteUniqueId = document.document.remote?.uniqueId,
+                remoteFileId = document.document.remote?.id,
+                remoteType = DOCUMENT,
+            )
+        }
+        is TdApi.MessagePhoto -> {
+            val sizes = content.photo.sizes
+            if (sizes.isEmpty()) return null
+            val biggest = sizes.maxBy { it.width * it.height }
+            ParsedMessage(
+                item =
+                    item(
+                        message = message,
+                        file = biggest.photo,
+                        name = "photo_${message.id}.jpg",
+                        isVideo = false,
+                        // The smallest existing size is already a cheap grid preview.
+                        thumbFileId = sizes.minBy { it.width * it.height }.photo.id,
+                        miniJpeg = content.photo.minithumbnail?.data,
+                    ),
+                remoteUniqueId = biggest.photo.remote?.uniqueId,
+                remoteFileId = biggest.photo.remote?.id,
+                remoteType = PHOTO,
+            )
+        }
+        is TdApi.MessageVideo ->
+            ParsedMessage(
+                item =
+                    item(
+                        message = message,
+                        file = content.video.video,
+                        name = content.video.fileName.ifBlank { "video_${message.id}.mp4" },
+                        isVideo = true,
+                        thumbFileId =
+                            content.video.thumbnail
+                                ?.file
+                                ?.id ?: 0,
+                        miniJpeg = content.video.minithumbnail?.data,
+                    ),
+                remoteUniqueId =
+                    content.video.video.remote
+                        ?.uniqueId,
+                remoteFileId =
+                    content.video.video.remote
+                        ?.id,
+                remoteType = VIDEO,
+            )
+        else -> null
+    }
+
+private const val PHOTO = "photo"
+private const val VIDEO = "video"
+private const val DOCUMENT = "document"
+
+private fun item(
+    message: TdApi.Message,
+    file: TdApi.File,
+    name: String,
+    isVideo: Boolean,
+    thumbFileId: Int = 0,
+    miniJpeg: ByteArray? = null,
+) = StashItem(
+    messageId = message.id,
+    chatId = message.chatId,
+    date = message.date,
+    fileId = file.id,
+    fileName = name,
+    sizeBytes = file.size.takeIf { it > 0L } ?: file.expectedSize,
+    isVideo = isVideo,
+    localPath = file.local?.path?.takeIf { file.local?.isDownloadingCompleted == true && it.isNotBlank() },
+    thumbFileId = thumbFileId,
+    miniJpeg = miniJpeg,
+)
+
+/** Accept image/video MIME types and fall back to the filename when blank. */
+private fun isGalleryMime(
+    mime: String,
+    name: String,
+): Boolean =
+    when {
+        mime.startsWith("image/") || mime.startsWith("video/") -> true
+        mime.isNotBlank() -> false
+        // Telegram leaves the MIME blank for some uploads; trust the extension.
+        else -> name.isVideoName() || name.isStillImageName()
+    }
+
+private val IMAGE_EXTENSIONS =
+    setOf("jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "bmp", "avif")
+
+private fun String.isVideoName(): Boolean = extension() in FileTypes.videoExtensions
+
+private fun String.isStillImageName(): Boolean = extension() in IMAGE_EXTENSIONS
+
+private fun String.extension(): String = substringAfterLast('.', "").lowercase()

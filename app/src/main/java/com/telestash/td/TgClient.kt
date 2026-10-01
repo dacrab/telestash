@@ -280,44 +280,35 @@ class TgClient private constructor(
         return topicId
     }
 
-    /** List Saved Messages topics; they arrive via updateSavedMessagesTopic. */
+    /**
+     * List Saved Messages topics. TDLib streams them back as updates with no
+     * completion signal, so this sends the request and then waits for the
+     * update stream to go quiet for [TOPICS_QUIET_PERIOD_MS].
+     */
     suspend fun loadTopics(): List<TdApi.SavedMessagesTopic> {
         val collected = mutableListOf<TdApi.SavedMessagesTopic>()
-        coroutineScopeRun { collector ->
-            val lastArrival = AtomicLong(System.currentTimeMillis())
-            collector.launch {
+        val lastArrival = AtomicLong(System.currentTimeMillis())
+        val collector =
+            scope.launch {
                 updates
                     .filterIsInstance<TdApi.UpdateSavedMessagesTopic>()
-                    .collect { u ->
-                        collected.add(u.topic)
-                        // "now" restarts the quiet-period clock below.
+                    .collect {
+                        collected.add(it.topic)
+                        // Each arrival restarts the quiet-period clock below.
                         lastArrival.set(System.currentTimeMillis())
                     }
             }
-            try {
-                send(TdApi.LoadSavedMessagesTopics(TOPICS_PAGE_LIMIT))
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-            }
-            // Wait until topic updates stop arriving for a short quiet period
-            // (or the overall timeout hits), instead of a fixed one-second wait.
+        try {
+            runCatching { send(TdApi.LoadSavedMessagesTopics(TOPICS_PAGE_LIMIT)) }
             withTimeoutOrNull(TOPICS_COLLECTION_TIMEOUT_MS) {
                 while (System.currentTimeMillis() - lastArrival.get() < TOPICS_QUIET_PERIOD_MS) {
                     delay(TOPICS_QUIET_PERIOD_MS)
                 }
             }
+        } finally {
+            collector.cancel()
         }
         return collected.distinctBy { it.id }
-    }
-
-    private suspend fun coroutineScopeRun(block: suspend (CoroutineScope) -> Unit) {
-        val s = CoroutineScope(Dispatchers.IO)
-        try {
-            block(s)
-        } finally {
-            s.cancel()
-        }
     }
 
     suspend fun uploadDocument(

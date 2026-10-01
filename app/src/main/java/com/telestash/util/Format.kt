@@ -11,15 +11,18 @@ object Format {
     private const val BYTES_PER_MB = BYTES_PER_KB * 1024
     private const val BYTES_PER_GB = BYTES_PER_MB * 1024
 
-    private fun atLocalTime(epochSec: Int) = Instant.ofEpochSecond(epochSec.toLong()).atZone(ZoneId.systemDefault())
+    // Built once: these are called per grid cell, and ofPattern() is not cheap.
+    private val dateFormatter: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.getDefault())
+    private val monthFormatter: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault())
+    private val zone: ZoneId = ZoneId.systemDefault()
 
     /** "Sep 14, 2026" */
-    fun date(epochSec: Int): String =
-        DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.getDefault()).format(atLocalTime(epochSec))
+    fun date(epochSec: Int): String = dateFormatter.format(atLocalTime(epochSec))
 
     /** "September 2026" month bucket label for timeline headers. */
-    fun monthYear(epochSec: Int): String =
-        DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault()).format(atLocalTime(epochSec))
+    fun monthYear(epochSec: Int): String = monthFormatter.format(atLocalTime(epochSec))
 
     /** "3.4 MB" style byte size. */
     fun size(bytes: Long): String {
@@ -31,4 +34,6 @@ object Format {
             else -> "%.1f GB".format(locale, bytes / BYTES_PER_GB.toDouble())
         }
     }
+
+    private fun atLocalTime(epochSec: Int) = Instant.ofEpochSecond(epochSec.toLong()).atZone(zone)
 }

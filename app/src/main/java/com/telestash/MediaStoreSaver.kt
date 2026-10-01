@@ -10,6 +10,7 @@ import com.telestash.data.ItemDao
 import com.telestash.data.UploadedEntity
 import com.telestash.device.DeviceMedia
 import com.telestash.util.FileTypes
+import com.telestash.util.Hashing
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -90,17 +91,9 @@ internal class MediaStoreSaver(
     ): String {
         val digest = MessageDigest.getInstance("SHA-256")
         resolver.openOutputStream(uri)?.use { output ->
-            source.inputStream().use { input ->
-                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                while (true) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    output.write(buffer, 0, count)
-                    digest.update(buffer, 0, count)
-                }
-            }
+            source.inputStream().use { input -> Hashing.copy(input, output, digest) }
         } ?: error("Could not open output stream")
-        return digest.digest().joinToString("") { "%02x".format(it) }
+        return Hashing.hex(digest.digest())
     }
 
     private fun publishIfNeeded(

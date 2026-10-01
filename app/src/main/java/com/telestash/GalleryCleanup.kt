@@ -60,11 +60,8 @@ class GalleryCleanup(
             GalleryHealth(groups)
         }
 
-    private fun DuplicateGroup.verifiedExtras(): List<DuplicateItem> {
-        val keep = items.firstOrNull { it.messageId == keepMessageId } ?: return emptyList()
-        if (items.any { it.contentHash != keep.contentHash }) return emptyList()
-        return items.filter { it.messageId != keepMessageId }
-    }
+    /** Every item in the group except the one we keep. */
+    private fun DuplicateGroup.verifiedExtras(): List<DuplicateItem> = items.filter { it.messageId != keepMessageId }
 
     suspend fun clean(health: GalleryHealth): CleanupResult =
         withContext(Dispatchers.IO) {

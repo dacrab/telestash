@@ -46,34 +46,47 @@ fun messageToEntity(
     topicId: Long = 0L,
 ): ItemEntity? = StashItem.fromMessage(message)?.toEntity(topicId = topicId)
 
+/**
+ * Indexes a message for cloud-side dedupe. Requires a remote identity: media
+ * Telegram has not finished uploading has nothing stable to match against.
+ */
 fun messageToRemoteMedia(
     message: TdApi.Message,
     accountId: Long,
     topicId: Long = 0L,
     contentHash: String? = null,
 ): RemoteMediaEntity? {
-    val item = StashItem.fromMessage(message) ?: return null
-    val remoteUniqueId = item.remoteUniqueId?.takeIf { it.isNotBlank() } ?: return null
-    val remoteFileId = item.remoteFileId?.takeIf { it.isNotBlank() } ?: return null
-    val remoteType =
-        when (message.content) {
-            is TdApi.MessagePhoto -> "photo"
-            is TdApi.MessageVideo -> "video"
-            is TdApi.MessageDocument -> "document"
-            else -> "document"
-        }
-    return RemoteMediaEntity(
+    val parsed = parse(message) ?: return null
+    val uniqueId = parsed.remoteUniqueId?.takeIf { it.isNotBlank() } ?: return null
+    val fileId = parsed.remoteFileId?.takeIf { it.isNotBlank() } ?: return null
+    return parsed.item.toRemoteMedia(
         accountId = accountId,
-        messageId = message.id,
-        chatId = item.chatId,
         topicId = topicId,
-        fileId = item.fileId,
-        remoteUniqueId = remoteUniqueId,
-        fileName = item.fileName,
-        sizeBytes = item.sizeBytes,
-        isVideo = item.isVideo,
+        remoteUniqueId = uniqueId,
+        remoteFileId = fileId,
+        remoteType = parsed.remoteType,
         contentHash = contentHash,
-        remoteFileId = remoteFileId,
-        remoteType = remoteType,
     )
 }
+
+private fun StashItem.toRemoteMedia(
+    accountId: Long,
+    topicId: Long,
+    remoteUniqueId: String,
+    remoteFileId: String,
+    remoteType: String,
+    contentHash: String?,
+) = RemoteMediaEntity(
+    accountId = accountId,
+    messageId = messageId,
+    chatId = chatId,
+    topicId = topicId,
+    fileId = fileId,
+    remoteUniqueId = remoteUniqueId,
+    fileName = fileName,
+    sizeBytes = sizeBytes,
+    isVideo = isVideo,
+    contentHash = contentHash,
+    remoteFileId = remoteFileId,
+    remoteType = remoteType,
+)

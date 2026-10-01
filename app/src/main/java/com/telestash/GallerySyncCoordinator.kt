@@ -18,8 +18,11 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import org.drinkless.tdlib.TdApi
-import kotlin.coroutines.coroutineContext
 
+/**
+ * Owns the Saved Messages -> Room sync and the paging cursors behind it. The
+ * UI only sees [GalleryUi]; every TDLib round-trip lives here.
+ */
 internal class GallerySyncCoordinator(
     private val scope: CoroutineScope,
     private val gallery: MutableStateFlow<GalleryUi>,
@@ -27,44 +30,60 @@ internal class GallerySyncCoordinator(
     private val settings: SettingsRepository,
     private val client: () -> TgClient?,
     private val toast: (String) -> Unit,
-    private val historyPageSize: Int,
-    private val syncMaxItems: Int,
-    private val loadMorePages: Int,
-    private val albumCaptionPrefix: String,
 ) {
-    private companion object {
-        const val REMOTE_UPSERT_CHUNK = 500
-        const val TOPIC_REQUEST_TIMEOUT_MS = 20_000L
+    companion object {
+        /** Messages per TDLib history request. */
+        const val HISTORY_PAGE_SIZE = 100
+
+        /** Initial cloud-history cap; endless scroll fetches past it on demand. */
+        const val SYNC_MAX_ITEMS = 4000
+
+        /** Pages per endless-scroll trigger (300 items). */
+        const val LOAD_MORE_PAGES = 3
+
+        private const val REMOTE_UPSERT_CHUNK = 500
+        private const val TOPIC_REQUEST_TIMEOUT_MS = 20_000L
+
+        /** TDLib's message for a request superseded by a newer one. */
+        private const val ABORTED = "request aborted"
     }
 
     private var oldestLoaded = Long.MAX_VALUE
     private val topicCursors = mutableMapOf<Long, Long>()
     private var topicJob: Job? = null
     private var mainHasMore = true
+
+    /** Completion callbacks fire on whichever thread the coroutine ends on. */
     private val trackedJobs = mutableSetOf<Job>()
     private var accountId = 0L
+
+    /**
+     * Whether to maintain the remote_media ledger. It exists only to dedupe
+     * against already-uploaded Saved Messages media, so writing it while that
+     * setting is off is thousands of row writes per sync for nothing.
+     */
+    private var indexRemoteMedia = false
 
     fun setAccountId(value: Long) {
         accountId = value
     }
 
+    /** Called when the user toggles remote dedupe so indexing starts or stops. */
+    fun setRemoteDedupeEnabled(enabled: Boolean) {
+        indexRemoteMedia = enabled
+    }
+
     suspend fun syncAll() {
-        trackCurrentJob()
-        val c =
-            client() ?: run {
-                untrackCurrentJob()
-                return
-            }
+        val c = client() ?: return
         ensureAccountId(c)
         val savedOldest = settings.lastSyncedOldestId()
 
         restoreMainCursor(savedOldest)
         gallery.update { it.copy(syncing = true, syncError = false) }
         try {
-            val newestPage = c.history(0L, historyPageSize)
+            val newestPage = c.history(0L, HISTORY_PAGE_SIZE)
             val newestId = newestPage.messages.maxOfOrNull { it.id } ?: 0L
-            val savedNewest = settings.lastSyncedNewestId()
-            if (shouldSkipSync(newestId, savedNewest, savedOldest)) return
+            if (shouldSkipSync(newestId, settings.lastSyncedNewestId(), savedOldest)) return
 
             val scan = collectInitialHistory(c, newestPage)
             if (scan.items.isNotEmpty()) upsertRemote(scan.items)
@@ -77,13 +96,14 @@ internal class GallerySyncCoordinator(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (e is TdException && e.message.orEmpty().contains("request aborted", ignoreCase = true)) {
+            // TDLib reports a superseded in-flight request this way; the newer
+            // pass already covers those messages.
+            if (e is TdException && e.message.orEmpty().contains(ABORTED, ignoreCase = true)) {
                 return
             }
             gallery.update { it.copy(syncError = true) }
             toast("Could not load gallery: ${e.message}")
         } finally {
-            untrackCurrentJob()
             gallery.update { it.copy(syncing = false) }
         }
     }
@@ -119,7 +139,7 @@ internal class GallerySyncCoordinator(
                     val c = client() ?: return@tracked
                     val page =
                         withTimeout(TOPIC_REQUEST_TIMEOUT_MS) {
-                            c.topicHistory(topicId, 0L, historyPageSize)
+                            c.topicHistory(topicId, 0L, HISTORY_PAGE_SIZE)
                         }
                     val fresh = page.messages.filter { it.id > 0L }
                     if (fresh.isNotEmpty()) {
@@ -162,12 +182,6 @@ internal class GallerySyncCoordinator(
         }
     }
 
-    suspend fun resetForAccountChange() {
-        resetState()
-        dao.clearAllAccountData()
-        settings.clearSyncWatermarks()
-    }
-
     suspend fun resetAfterLogout() {
         resetState()
         dao.clearGalleryData()
@@ -182,7 +196,7 @@ internal class GallerySyncCoordinator(
         messages: List<TdApi.Message>,
         topicId: Long = 0L,
     ) {
-        if (messages.isEmpty()) return
+        if (messages.isEmpty() || !indexRemoteMedia) return
         val c = client() ?: return
         val id = ensureAccountId(c)
         messages
@@ -225,44 +239,45 @@ internal class GallerySyncCoordinator(
         var oldestRawId = Long.MAX_VALUE
         var exhausted = false
         var keepGoing = true
-        while (scanned < syncMaxItems && keepGoing) {
+        while (scanned < SYNC_MAX_ITEMS && keepGoing) {
             indexRemoteMessages(page.messages.toList())
-            val step = scanPage(page, syncMaxItems - scanned, seenRawIds)
+            val step = scanPage(page, SYNC_MAX_ITEMS - scanned, seenRawIds)
             items += step.items
             scanned += step.scanned
             oldestRawId = minOf(oldestRawId, step.oldestRawId)
             exhausted = step.exhausted
-            if (step.stop || scanned >= syncMaxItems) {
+            val nextFrom = step.oldestRawId
+            if (step.exhausted || scanned >= SYNC_MAX_ITEMS) {
                 keepGoing = false
             } else {
-                val nextFrom = step.lastId
-                val invalidCursor = nextFrom <= 0L
                 val didNotMoveBack = fromId != 0L && nextFrom >= fromId
-                if (invalidCursor || didNotMoveBack) {
+                if (nextFrom <= 0L || didNotMoveBack) {
                     keepGoing = false
                 } else {
                     fromId = nextFrom
-                    page = c.history(fromId, minOf(historyPageSize, syncMaxItems - scanned))
+                    page = c.history(fromId, minOf(HISTORY_PAGE_SIZE, SYNC_MAX_ITEMS - scanned))
                 }
             }
         }
         return HistoryScan(items, oldestRawId, exhausted)
     }
 
+    /**
+     * Consumes one newest-first page, stopping at the first id already seen
+     * (TDLib can repeat a boundary message across pages). [oldestRawId] is the
+     * cursor for the next page and the floor for the sync watermark.
+     */
     private fun scanPage(
         page: TdApi.Messages,
         remaining: Int,
         seenRawIds: MutableSet<Long>,
     ): HistoryPage {
-        if (page.messages.isEmpty()) {
-            return HistoryPage(emptyList(), 0, Long.MAX_VALUE, Long.MAX_VALUE, true, true)
-        }
-        val messages = page.messages.take(remaining)
+        if (page.messages.isEmpty()) return HistoryPage(emptyList(), 0, Long.MAX_VALUE, exhausted = true)
         val items = mutableListOf<ItemEntity>()
         var consumed = 0
         var oldestRawId = Long.MAX_VALUE
         var repeated = false
-        for (message in messages) {
+        for (message in page.messages.take(remaining)) {
             if (message.id <= 0L || !seenRawIds.add(message.id)) {
                 repeated = true
                 break
@@ -275,9 +290,7 @@ internal class GallerySyncCoordinator(
             items = items,
             scanned = consumed,
             oldestRawId = oldestRawId,
-            lastId = messages.getOrNull(consumed - 1)?.id ?: Long.MAX_VALUE,
-            exhausted = false,
-            stop = repeated || consumed == 0,
+            exhausted = repeated || consumed == 0,
         )
     }
 
@@ -339,12 +352,12 @@ internal class GallerySyncCoordinator(
         val entities = mutableListOf<ItemEntity>()
         val seenRawIds = mutableSetOf<Long>()
         var fromId = startFromId
-        var pagesLeft = loadMorePages
+        var pagesLeft = LOAD_MORE_PAGES
         var exhausted = false
         var done = false
         while (pagesLeft > 0 && !done) {
             pagesLeft--
-            val page = c.history(fromId, historyPageSize)
+            val page = c.history(fromId, HISTORY_PAGE_SIZE)
             indexRemoteMessages(page.messages.toList())
             val step = scanMoreMainPage(page, fromId, seenRawIds)
             entities += step.items
@@ -380,7 +393,7 @@ internal class GallerySyncCoordinator(
                 val fromId = cursor
                 val page =
                     withTimeout(TOPIC_REQUEST_TIMEOUT_MS) {
-                        c.topicHistory(topicId, fromId, historyPageSize)
+                        c.topicHistory(topicId, fromId, HISTORY_PAGE_SIZE)
                     }
                 val fresh = page.messages.filter { it.id in 1 until fromId }
                 if (fresh.isEmpty()) {
@@ -434,7 +447,7 @@ internal class GallerySyncCoordinator(
         c: TgClient,
         topic: TdApi.SavedMessagesTopic,
     ) {
-        val messages = c.topicHistory(topic.id, 0L, historyPageSize)
+        val messages = c.topicHistory(topic.id, 0L, HISTORY_PAGE_SIZE)
         indexRemoteMessages(messages.messages.toList(), topic.id)
         upsertRemote(messages.messages.mapNotNull { messageToEntity(it, topicId = topic.id) })
         if (dao.albumName(topic.id) == null) {
@@ -449,24 +462,17 @@ internal class GallerySyncCoordinator(
                     (message.content as? TdApi.MessageText)
                         ?.text
                         ?.text
-                        ?.takeIf { it.startsWith(albumCaptionPrefix) }
+                        ?.takeIf { it.startsWith(TgClient.ALBUM_CAPTION_PREFIX) }
                 }.firstOrNull()
-        return caption?.removePrefix(albumCaptionPrefix)?.ifBlank { "Album" } ?: "Album"
+        return caption?.removePrefix(TgClient.ALBUM_CAPTION_PREFIX)?.ifBlank { "Album" } ?: "Album"
     }
 
     private fun isTopicActive(topicId: Long): Boolean = gallery.value.openTopicId == topicId
 
-    private suspend fun trackCurrentJob() {
-        val job = coroutineContext[Job] ?: return
-        synchronized(trackedJobs) { trackedJobs.add(job) }
-        job.invokeOnCompletion { synchronized(trackedJobs) { trackedJobs.remove(job) } }
-    }
-
-    private suspend fun untrackCurrentJob() {
-        val job = coroutineContext[Job] ?: return
-        synchronized(trackedJobs) { trackedJobs.remove(job) }
-    }
-
+    /**
+     * Launches sync work on IO and keeps it cancellable via [resetState], so
+     * an account change or logout can't leave a pass writing the old account's rows.
+     */
     private fun launchTracked(block: suspend CoroutineScope.() -> Unit): Job {
         val job = scope.launch(Dispatchers.IO) { block() }
         synchronized(trackedJobs) { trackedJobs.add(job) }
@@ -474,22 +480,16 @@ internal class GallerySyncCoordinator(
         return job
     }
 
-    private suspend fun cancelTrackedJobsAndJoin() {
-        val jobs = synchronized(trackedJobs) { trackedJobs.toList().also { trackedJobs.clear() } }
-        jobs.forEach { it.cancel() }
-        jobs.forEach { it.join() }
-    }
-
-    private suspend fun resetState() {
-        cancelTrackedJobsAndJoin()
+    /** Drops cursors, cancels in-flight sync work and clears the UI state. */
+    fun resetState() {
+        synchronized(trackedJobs) { trackedJobs.toList() }.forEach { it.cancel() }
+        synchronized(trackedJobs) { trackedJobs.clear() }
         accountId = 0L
         oldestLoaded = Long.MAX_VALUE
-        topicJob?.cancel()
-        topicJob?.join()
         topicJob = null
         topicCursors.clear()
         mainHasMore = true
-        gallery.update { GalleryUi() }
+        gallery.value = GalleryUi()
     }
 
     private data class HistoryScan(
@@ -502,9 +502,8 @@ internal class GallerySyncCoordinator(
         val items: List<ItemEntity>,
         val scanned: Int,
         val oldestRawId: Long,
-        val lastId: Long,
+        /** No more older messages to read (empty page, or a repeated boundary). */
         val exhausted: Boolean,
-        val stop: Boolean,
     )
 
     private data class MainPageBatch(

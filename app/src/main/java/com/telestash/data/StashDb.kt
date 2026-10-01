@@ -99,7 +99,6 @@ data class AlbumEntity(
     val order: Long,
 )
 
-@Suppress("TooManyFunctions")
 @Dao
 interface ItemDao {
     companion object {
@@ -246,9 +245,6 @@ interface ItemDao {
     @Query("DELETE FROM remote_media WHERE accountId = :accountId AND topicId = 0")
     suspend fun clearMainRemoteMediaForAccount(accountId: Long)
 
-    @Query("DELETE FROM remote_media")
-    suspend fun clearRemoteMedia()
-
     @Transaction
     suspend fun replaceRemoteMedia(
         accountId: Long,
@@ -352,8 +348,9 @@ interface ItemDao {
     @Query("DELETE FROM items WHERE messageId IN (:ids)")
     suspend fun deleteAll(ids: List<Long>)
 
+    /** Everything scoped to one account: gallery, albums and the remote index. */
     @Query("DELETE FROM items")
-    suspend fun clear()
+    suspend fun clearItems()
 
     @Query("DELETE FROM albums")
     suspend fun clearAlbums()
@@ -361,34 +358,42 @@ interface ItemDao {
     @Query("DELETE FROM uploads")
     suspend fun clearUploads()
 
+    @Query("DELETE FROM remote_media")
+    suspend fun clearRemoteMedia()
+
     @Transaction
     suspend fun clearGalleryData() {
-        clear()
+        clearItems()
         clearAlbums()
     }
 
     @Transaction
-    suspend fun clearAccountData() {
+    suspend fun clearAllAccountData() {
         clearGalleryData()
         clearRemoteMedia()
-    }
-
-    @Transaction
-    suspend fun clearAllAccountData() {
-        clearAccountData()
         clearUploads()
     }
 }
 
-private fun migrateItemsToV5(
+/**
+ * Rebuilds `items` in the current shape and adds the tables that arrived with
+ * it, carrying rows forward from [fromVersion].
+ *
+ * v0.3.0 is the only public release and it shipped schema 2. Schemas 1 and 3
+ * to 7 only ever existed in development builds, so these are the only two
+ * upgrade paths that have to keep working; Room replays one on next app start.
+ */
+private fun migrateToCurrent(
     db: SupportSQLiteDatabase,
     fromVersion: Int,
 ) {
-    val sourceTail =
+    // Columns carried forward, in the order the current table declares them.
+    val carriedForward =
         when (fromVersion) {
-            1 -> "0, NULL, 0, 0, NULL"
-            2 -> "`phash`, NULL, `topicId`, 0, NULL"
-            3 -> "`phash`, NULL, `topicId`, `thumbFileId`, `miniJpeg`"
+            // v1 (v0.2.0): no phash, no topicId, no albums table.
+            1 -> "`localPath`, `deviceUri`, NULL, 0, 0, NULL"
+            // v2 (v0.3.0): has topicId, still carries a now-unused phash.
+            2 -> "`localPath`, `deviceUri`, NULL, `topicId`, 0, NULL"
             else -> error("Unsupported StashDb version $fromVersion")
         }
     db.execSQL(
@@ -403,104 +408,6 @@ private fun migrateItemsToV5(
             `isVideo` INTEGER NOT NULL,
             `localPath` TEXT,
             `deviceUri` TEXT,
-            `phash` INTEGER NOT NULL,
-            `contentHash` TEXT,
-            `topicId` INTEGER NOT NULL,
-            `thumbFileId` INTEGER NOT NULL,
-            `miniJpeg` BLOB,
-            PRIMARY KEY(`messageId`)
-        )
-        """.trimIndent(),
-    )
-    db.execSQL(
-        """
-        INSERT INTO `items_new` (
-            `messageId`, `chatId`, `date`, `fileId`, `fileName`,
-            `sizeBytes`, `isVideo`, `localPath`, `deviceUri`,
-            `phash`, `contentHash`, `topicId`, `thumbFileId`, `miniJpeg`
-        )
-        SELECT
-            `messageId`, `chatId`, `date`, `fileId`, `fileName`,
-            `sizeBytes`, `isVideo`, `localPath`, `deviceUri`,
-            $sourceTail
-        FROM `items`
-        """.trimIndent(),
-    )
-    db.execSQL("DROP TABLE `items`")
-    db.execSQL("ALTER TABLE `items_new` RENAME TO `items`")
-    if (fromVersion == 1) {
-        db.execSQL(
-            """
-            CREATE TABLE `albums` (
-                `topicId` INTEGER NOT NULL,
-                `name` TEXT NOT NULL,
-                `order` INTEGER NOT NULL,
-                PRIMARY KEY(`topicId`)
-            )
-            """.trimIndent(),
-        )
-    }
-    db.execSQL(
-        """
-        CREATE TABLE `uploads` (
-            `contentHash` TEXT NOT NULL,
-            `fileName` TEXT NOT NULL,
-            `sizeBytes` INTEGER NOT NULL,
-            `deviceUri` TEXT,
-            `uploadedAt` INTEGER NOT NULL,
-            PRIMARY KEY(`contentHash`)
-        )
-        """.trimIndent(),
-    )
-    db.execSQL(
-        "CREATE INDEX `index_items_topicId_date_messageId` ON `items` (`topicId`, `date`, `messageId`)",
-    )
-    db.execSQL(
-        "CREATE INDEX `index_items_topicId_isVideo_date_messageId` " +
-            "ON `items` (`topicId`, `isVideo`, `date`, `messageId`)",
-    )
-    db.execSQL("CREATE INDEX `index_items_deviceUri` ON `items` (`deviceUri`)")
-    db.execSQL("CREATE INDEX `index_items_phash` ON `items` (`phash`)")
-    db.execSQL("CREATE INDEX `index_items_contentHash` ON `items` (`contentHash`)")
-}
-
-val MIGRATION_1_5 =
-    object : Migration(1, 5) {
-        override fun migrate(db: SupportSQLiteDatabase) = migrateItemsToV5(db, 1)
-    }
-
-val MIGRATION_2_5 =
-    object : Migration(2, 5) {
-        override fun migrate(db: SupportSQLiteDatabase) = migrateItemsToV5(db, 2)
-    }
-
-val MIGRATION_3_5 =
-    object : Migration(3, 5) {
-        override fun migrate(db: SupportSQLiteDatabase) = migrateItemsToV5(db, 3)
-    }
-
-private fun migrateItemsToV6(db: SupportSQLiteDatabase) {
-    db.execSQL(
-        """
-        INSERT OR IGNORE INTO `uploads` (`contentHash`, `fileName`, `sizeBytes`, `deviceUri`, `uploadedAt`)
-        SELECT `contentHash`, `fileName`, `sizeBytes`, `deviceUri`, 0
-        FROM `items`
-        WHERE `messageId` <= 0 AND `contentHash` IS NOT NULL AND `contentHash` != ''
-        """.trimIndent(),
-    )
-    db.execSQL("DELETE FROM `items` WHERE `messageId` <= 0")
-    db.execSQL(
-        """
-        CREATE TABLE `items_new` (
-            `messageId` INTEGER NOT NULL,
-            `chatId` INTEGER NOT NULL,
-            `date` INTEGER NOT NULL,
-            `fileId` INTEGER NOT NULL,
-            `fileName` TEXT NOT NULL,
-            `sizeBytes` INTEGER NOT NULL,
-            `isVideo` INTEGER NOT NULL,
-            `localPath` TEXT,
-            `deviceUri` TEXT,
             `contentHash` TEXT,
             `topicId` INTEGER NOT NULL,
             `thumbFileId` INTEGER NOT NULL,
@@ -518,74 +425,89 @@ private fun migrateItemsToV6(db: SupportSQLiteDatabase) {
         )
         SELECT
             `messageId`, `chatId`, `date`, `fileId`, `fileName`,
-            `sizeBytes`, `isVideo`, `localPath`, `deviceUri`,
-            `contentHash`, `topicId`, `thumbFileId`, `miniJpeg`
+            `sizeBytes`, `isVideo`, $carriedForward
         FROM `items`
         """.trimIndent(),
     )
     db.execSQL("DROP TABLE `items`")
     db.execSQL("ALTER TABLE `items_new` RENAME TO `items`")
-    db.execSQL(
-        "CREATE INDEX `index_items_topicId_date_messageId` ON `items` (`topicId`, `date`, `messageId`)",
-    )
-    db.execSQL(
-        "CREATE INDEX `index_items_topicId_isVideo_date_messageId` " +
-            "ON `items` (`topicId`, `isVideo`, `date`, `messageId`)",
-    )
-    db.execSQL("CREATE INDEX `index_items_deviceUri` ON `items` (`deviceUri`)")
-    db.execSQL("CREATE INDEX `index_items_contentHash` ON `items` (`contentHash`)")
+
+    INDEXES.forEach(db::execSQL)
+    // v1 predates albums entirely; v2 already has the table.
+    if (fromVersion == 1) db.execSQL(CREATE_ALBUMS)
+    db.execSQL(CREATE_UPLOADS)
+    db.execSQL(CREATE_REMOTE_MEDIA)
+    REMOTE_MEDIA_INDEXES.forEach(db::execSQL)
 }
 
-val MIGRATION_5_6 =
-    object : Migration(5, 6) {
-        override fun migrate(db: SupportSQLiteDatabase) = migrateItemsToV6(db)
+private val INDEXES =
+    listOf(
+        "CREATE INDEX `index_items_topicId_date_messageId` ON `items` (`topicId`, `date`, `messageId`)",
+        "CREATE INDEX `index_items_topicId_isVideo_date_messageId` " +
+            "ON `items` (`topicId`, `isVideo`, `date`, `messageId`)",
+        "CREATE INDEX `index_items_deviceUri` ON `items` (`deviceUri`)",
+        "CREATE INDEX `index_items_contentHash` ON `items` (`contentHash`)",
+    )
+
+private val REMOTE_MEDIA_INDEXES =
+    listOf(
+        "CREATE INDEX IF NOT EXISTS `index_remote_media_accountId_topicId_sizeBytes_isVideo` " +
+            "ON `remote_media` (`accountId`, `topicId`, `sizeBytes`, `isVideo`)",
+        "CREATE INDEX IF NOT EXISTS `index_remote_media_accountId_topicId_contentHash` " +
+            "ON `remote_media` (`accountId`, `topicId`, `contentHash`)",
+        "CREATE INDEX IF NOT EXISTS `index_remote_media_accountId_remoteUniqueId` " +
+            "ON `remote_media` (`accountId`, `remoteUniqueId`)",
+    )
+
+private val CREATE_ALBUMS =
+    """
+    CREATE TABLE `albums` (
+        `topicId` INTEGER NOT NULL,
+        `name` TEXT NOT NULL,
+        `order` INTEGER NOT NULL,
+        PRIMARY KEY(`topicId`)
+    )
+    """.trimIndent()
+
+private val CREATE_UPLOADS =
+    """
+    CREATE TABLE `uploads` (
+        `contentHash` TEXT NOT NULL,
+        `fileName` TEXT NOT NULL,
+        `sizeBytes` INTEGER NOT NULL,
+        `deviceUri` TEXT,
+        `uploadedAt` INTEGER NOT NULL,
+        PRIMARY KEY(`contentHash`)
+    )
+    """.trimIndent()
+
+private val CREATE_REMOTE_MEDIA =
+    """
+    CREATE TABLE `remote_media` (
+        `accountId` INTEGER NOT NULL,
+        `messageId` INTEGER NOT NULL,
+        `chatId` INTEGER NOT NULL,
+        `topicId` INTEGER NOT NULL,
+        `fileId` INTEGER NOT NULL,
+        `remoteUniqueId` TEXT NOT NULL,
+        `fileName` TEXT NOT NULL,
+        `sizeBytes` INTEGER NOT NULL,
+        `isVideo` INTEGER NOT NULL,
+        `contentHash` TEXT,
+        `remoteFileId` TEXT NOT NULL DEFAULT '',
+        `remoteType` TEXT NOT NULL DEFAULT 'document',
+        PRIMARY KEY(`accountId`, `messageId`)
+    )
+    """.trimIndent()
+
+val MIGRATION_1_8 =
+    object : Migration(1, 8) {
+        override fun migrate(db: SupportSQLiteDatabase) = migrateToCurrent(db, 1)
     }
 
-val MIGRATION_6_7 =
-    object : Migration(6, 7) {
-        override fun migrate(db: SupportSQLiteDatabase) {
-            db.execSQL(
-                """
-                CREATE TABLE IF NOT EXISTS `remote_media` (
-                    `accountId` INTEGER NOT NULL,
-                    `messageId` INTEGER NOT NULL,
-                    `chatId` INTEGER NOT NULL,
-                    `topicId` INTEGER NOT NULL,
-                    `fileId` INTEGER NOT NULL,
-                    `remoteUniqueId` TEXT NOT NULL,
-                    `fileName` TEXT NOT NULL,
-                    `sizeBytes` INTEGER NOT NULL,
-                    `isVideo` INTEGER NOT NULL,
-                    `contentHash` TEXT,
-                    PRIMARY KEY(`accountId`, `messageId`)
-                )
-                """.trimIndent(),
-            )
-            db.execSQL(
-                "CREATE INDEX IF NOT EXISTS `index_remote_media_accountId_topicId_sizeBytes_isVideo` " +
-                    "ON `remote_media` (`accountId`, `topicId`, `sizeBytes`, `isVideo`)",
-            )
-            db.execSQL(
-                "CREATE INDEX IF NOT EXISTS `index_remote_media_accountId_topicId_contentHash` " +
-                    "ON `remote_media` (`accountId`, `topicId`, `contentHash`)",
-            )
-            db.execSQL(
-                "CREATE INDEX IF NOT EXISTS `index_remote_media_accountId_remoteUniqueId` " +
-                    "ON `remote_media` (`accountId`, `remoteUniqueId`)",
-            )
-        }
-    }
-
-val MIGRATION_7_8 =
-    object : Migration(7, 8) {
-        override fun migrate(db: SupportSQLiteDatabase) {
-            db.execSQL(
-                "ALTER TABLE `remote_media` ADD COLUMN `remoteFileId` TEXT NOT NULL DEFAULT ''",
-            )
-            db.execSQL(
-                "ALTER TABLE `remote_media` ADD COLUMN `remoteType` TEXT NOT NULL DEFAULT 'document'",
-            )
-        }
+val MIGRATION_2_8 =
+    object : Migration(2, 8) {
+        override fun migrate(db: SupportSQLiteDatabase) = migrateToCurrent(db, 2)
     }
 
 @Database(
