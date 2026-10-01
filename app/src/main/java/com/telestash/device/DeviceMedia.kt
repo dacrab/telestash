@@ -4,6 +4,7 @@ import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.storage.StorageManager
 import android.provider.MediaStore
 import java.io.File
 
@@ -45,37 +46,35 @@ object DeviceMedia {
     /** Levels from getExternalFilesDir (…/Android/data/<pkg>/files) up to the volume root. */
     private const val APP_FILES_DIR_DEPTH = 4
 
-    /** Image collection covering all external volumes, API-level safe. */
-    fun imageCollection(): Uri =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        } else {
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+    /** All external volumes; [primaryOnly] restricts to the one the camera writes to. */
+    private fun collection(
+        images: Boolean,
+        primaryOnly: Boolean = false,
+    ): Uri {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return if (images) {
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            } else {
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            }
         }
+        val volume = if (primaryOnly) MediaStore.VOLUME_EXTERNAL_PRIMARY else MediaStore.VOLUME_EXTERNAL
+        return if (images) {
+            MediaStore.Images.Media.getContentUri(volume)
+        } else {
+            MediaStore.Video.Media.getContentUri(volume)
+        }
+    }
 
-    /** Video collection covering all external volumes, API-level safe. */
-    fun videoCollection(): Uri =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        } else {
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        }
+    fun imageCollection(): Uri = collection(images = true)
+
+    fun videoCollection(): Uri = collection(images = false)
 
     /** Primary-volume image collection, for saving downloads back to the gallery. */
-    fun imageCollectionPrimary(): Uri =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        } else {
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        }
+    fun imageCollectionPrimary(): Uri = collection(images = true, primaryOnly = true)
 
     /** Primary-volume video collection, for saving downloads back to the gallery. */
-    fun videoCollectionPrimary(): Uri =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        } else {
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        }
+    fun videoCollectionPrimary(): Uri = collection(images = false, primaryOnly = true)
 
     /** Folders containing at least one visible image or video, busiest first. */
     fun folders(context: Context): List<DeviceFolder> {
@@ -262,11 +261,18 @@ object DeviceMedia {
     }
 
     /**
-     * Primary shared-storage root, derived from the app's external files dir
-     * (…/Android/data/<pkg>/files, four levels up) to avoid the deprecated
-     * Environment call. Null when it can't be determined.
+     * Primary shared-storage root, needed to turn a Q+ RELATIVE_PATH into real
+     * directories. Uses [StorageVolume.getDirectory] where available; older
+     * releases fall back to walking up from the app's external files dir
+     * (…/Android/data/<pkg>/files, four levels up), which is the only route
+     * left once Environment.getExternalStorageDirectory is off the table.
+     * Null when it can't be determined, in which case nothing is treated hidden.
      */
     private fun primaryVolumeRoot(context: Context): File? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val storage = context.getSystemService(StorageManager::class.java)
+            return storage?.storageVolumes?.firstOrNull { it.isPrimary }?.directory
+        }
         var dir = context.getExternalFilesDir(null) ?: return null
         repeat(APP_FILES_DIR_DEPTH) { dir = dir.parentFile ?: return null }
         return dir

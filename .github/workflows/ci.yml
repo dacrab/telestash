@@ -27,26 +27,17 @@ jobs:
           java-version: 21
 
       - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
-        with:
-          cache-read-only: false
 
-      - name: Lint (ktlint + detekt)
-        run: ./gradlew ktlintCheck detekt
+      # One invocation: the configuration cache and daemon are reused, so
+      # separate steps would only re-pay startup and dependency resolution.
+      - name: Lint, test and build
+        run: ./gradlew ktlintCheck detekt lintDebug testDebugUnitTest assembleDebug assembleRelease
 
-      - name: Android lint
-        run: ./gradlew lintDebug
-
-      - name: Unit tests
-        run: ./gradlew test
-
-      - name: Build debug and minified release
-        run: ./gradlew assembleDebug assembleRelease
-
+      # ABI splits apply to debug too, so pick the arm64 build (~48 MB) rather
+      # than the ~117 MB universal one; it's what a real phone or emulator needs.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: telestash-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
           if-no-files-found: error
-          # Debug APKs are ~115 MB and the free artifact quota is 500 MB,
-          # so keep only ~1 day's worth around.
           retention-days: 1

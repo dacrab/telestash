@@ -4,7 +4,6 @@ import android.content.Context
 import android.net.Uri
 import com.telestash.data.ItemDao
 import com.telestash.data.RemoteMediaEntity
-import com.telestash.data.SettingsRepository
 import com.telestash.data.UploadedEntity
 import com.telestash.device.DeviceMedia
 import com.telestash.device.PendingMedia
@@ -13,14 +12,12 @@ import com.telestash.model.messageToRemoteMedia
 import com.telestash.model.toEntity
 import com.telestash.td.TdException
 import com.telestash.td.TgClient
+import com.telestash.util.Hashing
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.drinkless.tdlib.TdApi
 import java.io.File
-import java.io.InputStream
-import java.io.OutputStream
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -66,23 +63,17 @@ object BackupEngine {
         val contentHash: String,
     )
 
+    /** Anything outside this set is replaced in staged file names. */
+    private val UNSAFE_NAME_CHARS = Regex("[^A-Za-z0-9._-]")
+
     private val backupMutex = Mutex()
 
-    /** Not-yet-backed-up visible device media for the configured folders. */
-    suspend fun pending(
-        context: Context,
-        dao: ItemDao,
-        settings: SettingsRepository,
-    ): List<PendingMedia> = pending(context, dao, settings.backupFolders.first())
-
+    /** Not-yet-backed-up visible device media in [allowedFolders] (all when empty). */
     suspend fun pending(
         context: Context,
         dao: ItemDao,
         allowedFolders: Set<String>,
-    ): List<PendingMedia> {
-        val known = dao.allDeviceUris().toSet()
-        return DeviceMedia.pending(context, known, allowedFolders)
-    }
+    ): List<PendingMedia> = DeviceMedia.pending(context, dao.allDeviceUris().toSet(), allowedFolders)
 
     /** Deletes staged copies left behind by interrupted uploads. */
     fun sweepStaleStaged(context: Context) {
@@ -102,7 +93,6 @@ object BackupEngine {
      * Uploads [items] in one pass, loading dedupe hashes and known URIs once.
      * [topicId] routes uploads into an album. Returns early on FLOOD_WAIT.
      */
-    @Suppress("CyclomaticComplexMethod")
     suspend fun backupAll(
         context: Context,
         client: TgClient,
@@ -121,16 +111,7 @@ object BackupEngine {
             }
             val remoteAccountId =
                 if (remoteDedupe && dedupe && topicId == 0L) {
-                    try {
-                        accountId ?: client.currentUserId()
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: TdException) {
-                        if (e.isFloodWait) throw e
-                        0L
-                    } catch (_: Exception) {
-                        0L
-                    }
+                    remoteAccountId(client, accountId)
                 } else {
                     0L
                 }
@@ -145,33 +126,27 @@ object BackupEngine {
                 } else {
                     hashSetOf()
                 }
-            // The list may predate a concurrent pass that already recorded these
-            // URIs: skip them up front instead of a COUNT(*) per item.
-            val knownUris = dao.allDeviceUris().toMutableSet()
-            val processedUris = mutableSetOf<String>()
-            val seq = AtomicInteger(0)
             var uploaded = 0
             var skipped = 0
             val failedNames = mutableListOf<String>()
             val possibleRemoteMatches = mutableListOf<String>()
-            val remoteBudget = RemoteVerificationBudget()
 
+            val pass =
+                UploadPass(
+                    context = context,
+                    client = client,
+                    dao = dao,
+                    topicId = topicId,
+                    remoteAccountId = remoteAccountId,
+                    remoteBudget = RemoteVerificationBudget(),
+                    knownHashes = knownHashes,
+                    knownUris = dao.allDeviceUris().toMutableSet(),
+                    processedUris = mutableSetOf(),
+                    seq = AtomicInteger(0),
+                    dedupe = dedupe,
+                )
             items.forEachIndexed { index, item ->
-                val result =
-                    uploadOne(
-                        context,
-                        client,
-                        dao,
-                        item,
-                        topicId,
-                        dedupe,
-                        remoteAccountId,
-                        remoteBudget,
-                        knownHashes,
-                        knownUris,
-                        processedUris,
-                        seq,
-                    )
+                val result = pass.upload(item)
                 when (result.outcome) {
                     Outcome.UPLOADED -> uploaded++
                     Outcome.SKIPPED -> skipped++
@@ -179,8 +154,8 @@ object BackupEngine {
                 }
                 if (result.possibleRemoteMatch) possibleRemoteMatches.add(item.displayName)
                 if (result.outcome != Outcome.FAILED) {
-                    processedUris += item.uri.toString()
-                    knownUris += item.uri.toString()
+                    pass.processedUris += item.uri.toString()
+                    pass.knownUris += item.uri.toString()
                 }
                 onProgress(index + 1, items.size)
             }
@@ -193,88 +168,123 @@ object BackupEngine {
         }
     }
 
-    @Suppress("CyclomaticComplexMethod", "ThrowsCount")
-    private suspend fun uploadOne(
-        context: Context,
+    /**
+     * The account whose Saved Messages to dedupe against, or 0 when it can't be
+     * resolved — in which case this pass simply uploads without the cloud check.
+     */
+    private suspend fun remoteAccountId(
         client: TgClient,
-        dao: ItemDao,
-        item: PendingMedia,
-        topicId: Long,
-        dedupe: Boolean,
-        remoteAccountId: Long,
-        remoteBudget: RemoteVerificationBudget,
-        knownHashes: HashSet<String>,
-        knownUris: MutableSet<String>,
-        processedUris: Set<String>,
-        seq: AtomicInteger,
-    ): UploadResult {
-        val uri = item.uri.toString()
-        val shouldDedupe = dedupe && topicId == 0L
-        if (uri in processedUris || (shouldDedupe && uri in knownUris)) {
-            return UploadResult(Outcome.SKIPPED)
-        }
-        var staged: Staged? = null
-        return try {
-            val copy = stage(context, item, seq) ?: return UploadResult(Outcome.FAILED)
-            staged = copy
-            if (shouldDedupe && copy.contentHash in knownHashes) {
-                dao.upsertUploaded(listOf(uploadedEntity(item, copy.contentHash)))
-                return UploadResult(Outcome.SKIPPED)
-            }
-            val remoteCheck =
-                if (shouldDedupe) {
-                    isRemoteDuplicate(
-                        client,
-                        dao,
-                        remoteAccountId,
-                        item,
-                        copy.file.length(),
-                        copy.contentHash,
-                        remoteBudget,
-                    )
-                } else {
-                    RemoteDuplicateCheck()
-                }
-            if (remoteCheck.exact) {
-                dao.upsertUploaded(listOf(uploadedEntity(item, copy.contentHash)))
-                return UploadResult(Outcome.SKIPPED)
-            }
-            val msg = client.uploadDocument(copy.file.absolutePath, item.displayName, topicId)
-            val mapped = StashItem.fromMessage(msg)
-            dao.upsertUploaded(listOf(uploadedEntity(item, copy.contentHash)))
-            if (remoteAccountId != 0L) {
-                try {
-                    messageToRemoteMedia(msg, remoteAccountId, topicId, copy.contentHash)?.let {
-                        dao.upsertRemoteMedia(listOf(it))
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                }
-            }
-
-            // Ledger first: it's the dedupe record, so if the gallery-row write
-            // below fails a later pass sees this file as done instead of
-            // re-uploading it (the message itself arrives on the next sync).
-            writeMappedItem(dao, mapped, item, topicId, copy.contentHash)
-            knownHashes.add(copy.contentHash)
-            UploadResult(Outcome.UPLOADED, remoteCheck.possible)
+        known: Long?,
+    ): Long =
+        try {
+            known ?: client.currentUserId()
         } catch (e: CancellationException) {
             throw e
         } catch (e: TdException) {
-            // Only a rate limit should abort the batch; other errors are per-item.
             if (e.isFloodWait) throw e
-            UploadResult(Outcome.FAILED)
+            0L
         } catch (_: Exception) {
-            UploadResult(Outcome.FAILED)
-        } finally {
-            // uploadDocument returns only once the server holds the bytes (or a
-            // definitive failure), so the copy can be freed right away.
-            staged?.file?.delete()
+            0L
+        }
+
+    /**
+     * State shared by every item in one [backupAll] pass: the dedupe lookups
+     * are loaded once and grown as uploads succeed, instead of querying per item.
+     */
+    private class UploadPass(
+        val context: Context,
+        val client: TgClient,
+        val dao: ItemDao,
+        val topicId: Long,
+        val remoteAccountId: Long,
+        private val remoteBudget: RemoteVerificationBudget,
+        private val knownHashes: MutableSet<String>,
+        val knownUris: MutableSet<String>,
+        val processedUris: MutableSet<String>,
+        private val seq: AtomicInteger,
+        dedupe: Boolean,
+    ) {
+        /** Dedupe only applies to the main library; album copies stay independent. */
+        private val shouldDedupe = dedupe && topicId == 0L
+
+        suspend fun upload(item: PendingMedia): UploadResult {
+            val uri = item.uri.toString()
+            if (uri in processedUris || (shouldDedupe && uri in knownUris)) {
+                return UploadResult(Outcome.SKIPPED)
+            }
+            var staged: Staged? = null
+            return try {
+                val copy = stage(context, item, seq) ?: return UploadResult(Outcome.FAILED)
+                staged = copy
+
+                if (shouldDedupe && copy.contentHash in knownHashes) return recordSkip(item, copy)
+
+                val remoteCheck =
+                    if (shouldDedupe) {
+                        isRemoteDuplicate(
+                            client,
+                            dao,
+                            remoteAccountId,
+                            item,
+                            copy.file.length(),
+                            copy.contentHash,
+                            remoteBudget,
+                        )
+                    } else {
+                        RemoteDuplicateCheck()
+                    }
+                if (remoteCheck.exact) return recordSkip(item, copy)
+
+                val message = client.uploadDocument(copy.file.absolutePath, item.displayName, topicId)
+                // Ledger first: it is the dedupe record, so if the gallery-row
+                // write below fails a later pass sees this file as done rather
+                // than re-uploading it (the message itself arrives on the next sync).
+                dao.upsertUploaded(listOf(uploadedEntity(item, copy.contentHash)))
+                indexUploadedMessage(message, copy.contentHash)
+                writeMappedItem(dao, StashItem.fromMessage(message), item, topicId, copy.contentHash)
+                knownHashes.add(copy.contentHash)
+                UploadResult(Outcome.UPLOADED, remoteCheck.possible)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: TdException) {
+                // Only a rate limit should abort the batch; other errors are per-item.
+                if (e.isFloodWait) throw e
+                UploadResult(Outcome.FAILED)
+            } catch (_: Exception) {
+                UploadResult(Outcome.FAILED)
+            } finally {
+                // uploadDocument returns only once the server holds the bytes (or a
+                // definitive failure), so the cache copy can be freed right away.
+                staged?.file?.delete()
+            }
+        }
+
+        /** Already in the cloud: record it in the ledger so it is never retried. */
+        private suspend fun recordSkip(
+            item: PendingMedia,
+            staged: Staged,
+        ): UploadResult {
+            dao.upsertUploaded(listOf(uploadedEntity(item, staged.contentHash)))
+            return UploadResult(Outcome.SKIPPED)
+        }
+
+        private suspend fun indexUploadedMessage(
+            message: TdApi.Message,
+            contentHash: String,
+        ) {
+            if (remoteAccountId == 0L) return
+            try {
+                messageToRemoteMedia(message, remoteAccountId, topicId, contentHash)?.let {
+                    dao.upsertRemoteMedia(listOf(it))
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // The index is an optimization; a miss only costs a re-check later.
+            }
         }
     }
 
-    @Suppress("CyclomaticComplexMethod")
     private suspend fun isRemoteDuplicate(
         client: TgClient,
         dao: ItemDao,
@@ -293,47 +303,69 @@ object BackupEngine {
         ) {
             return RemoteDuplicateCheck(exact = true)
         }
-        var possible = false
         val allCandidates =
             dao
                 .remoteMediaCandidates(accountId, 0L, sizeBytes, item.isVideo, MAX_REMOTE_CANDIDATES + 1)
                 .distinctBy { it.remoteUniqueId }
-        possible = allCandidates.size > MAX_REMOTE_CANDIDATES
-        for (candidate in allCandidates.take(MAX_REMOTE_CANDIDATES)) {
-            if (candidate.fileId > 0) {
-                val remoteHash =
-                    if (candidate.contentHash != null) {
-                        if (
-                            client.messageExists(candidate.chatId, candidate.messageId) &&
-                            remoteFileExists(client, candidate)
-                        ) {
-                            candidate.contentHash
-                        } else {
-                            possible = true
-                            null
-                        }
-                    } else if (candidate.sizeBytes <= budget.remainingBytes) {
-                        budget.remainingBytes -= candidate.sizeBytes
-                        hashRemoteFile(client, candidate)
-                    } else {
-                        possible = true
-                        null
-                    }
-                if (remoteHash != null) {
-                    if (candidate.contentHash == null) {
-                        dao.updateRemoteMediaHash(accountId, candidate.remoteUniqueId, remoteHash)
-                    }
-                    if (
-                        remoteHash == contentHash &&
-                        client.messageExists(candidate.chatId, candidate.messageId)
-                    ) {
-                        return RemoteDuplicateCheck(exact = true)
-                    }
-                    possible = true
-                }
+        // More candidates than we are willing to check means we cannot rule out
+        // a match, so the caller is told a possible duplicate was left alone.
+        var possible = allCandidates.size > MAX_REMOTE_CANDIDATES
+        for (candidate in allCandidates.take(MAX_REMOTE_CANDIDATES).filter { it.fileId > 0 }) {
+            when (verifyCandidate(client, dao, accountId, candidate, budget, contentHash)) {
+                CandidateMatch.EXACT -> return RemoteDuplicateCheck(exact = true)
+                // Either the bytes differ, or we could not prove they do.
+                CandidateMatch.HASH_MISMATCH, CandidateMatch.UNVERIFIED -> possible = true
+                CandidateMatch.OTHER -> Unit
             }
         }
         return RemoteDuplicateCheck(possible = possible)
+    }
+
+    private enum class CandidateMatch {
+        /** Byte-identical to the file being uploaded: do not upload it again. */
+        EXACT,
+
+        /** Hashed and confirmed different. */
+        OTHER,
+
+        /** Hashed and different, but the upload ledger still needs warning. */
+        HASH_MISMATCH,
+
+        /** Could not be resolved; may or may not be a duplicate. */
+        UNVERIFIED,
+    }
+
+    /**
+     * Compares one Saved Messages candidate against the file being uploaded,
+     * reusing the indexed hash when there is one and otherwise spending
+     * download budget to compute it. Anything unresolvable is UNVERIFIED, so
+     * the caller warns instead of silently uploading a possible duplicate.
+     */
+    private suspend fun verifyCandidate(
+        client: TgClient,
+        dao: ItemDao,
+        accountId: Long,
+        candidate: RemoteMediaEntity,
+        budget: RemoteVerificationBudget,
+        contentHash: String,
+    ): CandidateMatch {
+        val known = candidate.contentHash
+        if (known != null) {
+            val live =
+                client.messageExists(candidate.chatId, candidate.messageId) &&
+                    remoteFileExists(client, candidate)
+            return when {
+                !live -> CandidateMatch.UNVERIFIED
+                known != contentHash -> CandidateMatch.HASH_MISMATCH
+                client.messageExists(candidate.chatId, candidate.messageId) -> CandidateMatch.EXACT
+                else -> CandidateMatch.UNVERIFIED
+            }
+        }
+        if (candidate.sizeBytes > budget.remainingBytes) return CandidateMatch.UNVERIFIED
+        budget.remainingBytes -= candidate.sizeBytes
+        val hash = hashRemoteFile(client, candidate) ?: return CandidateMatch.UNVERIFIED
+        dao.updateRemoteMediaHash(accountId, candidate.remoteUniqueId, hash)
+        return if (hash == contentHash) CandidateMatch.OTHER else CandidateMatch.HASH_MISMATCH
     }
 
     private data class RemoteDuplicateCheck(
@@ -367,7 +399,7 @@ object BackupEngine {
     ): String? =
         try {
             val file = client.resolveRemoteFile(candidate.remoteFileId, remoteFileType(candidate.remoteType))
-            hashFile(File(client.download(file.id)))
+            Hashing.sha256(File(client.download(file.id)))
         } catch (e: CancellationException) {
             throw e
         } catch (e: TdException) {
@@ -383,19 +415,6 @@ object BackupEngine {
             "video" -> TdApi.FileTypeVideo()
             else -> TdApi.FileTypeDocument()
         }
-
-    private fun hashFile(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { input ->
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                digest.update(buffer, 0, count)
-            }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
 
     private object SavedMessagesIndex {
         private val mutex = Mutex()
@@ -439,36 +458,33 @@ object BackupEngine {
             indexedAccountId == accountId &&
                 System.currentTimeMillis() - indexedAt < REMOTE_INDEX_CACHE_MS
 
-        @Suppress("LoopWithTooManyJumpStatements")
+        /**
+         * Walks the whole Saved Messages history, newest first. Stops when a
+         * page yields nothing new or the cursor stops moving, and reports
+         * whether that was a genuine end of history — an incomplete walk must
+         * not be treated as an authoritative index.
+         */
         private suspend fun scan(
             client: TgClient,
             accountId: Long,
         ): RemoteIndexScan {
             val items = mutableListOf<RemoteMediaEntity>()
             var fromId = 0L
-            var complete = false
             while (true) {
-                val page = client.history(fromId, REMOTE_INDEX_PAGE_SIZE)
-                val fresh =
-                    if (fromId == 0L) {
-                        page.messages.filter { it.id > 0L }
-                    } else {
-                        page.messages.filter { it.id in 1 until fromId }
-                    }
-                if (fresh.isEmpty()) {
-                    complete = true
-                    break
-                }
+                val fresh = client.history(fromId, REMOTE_INDEX_PAGE_SIZE).newerThan(fromId)
+                if (fresh.isEmpty()) return RemoteIndexScan(items, complete = true)
                 items += fresh.mapNotNull { messageToRemoteMedia(it, accountId) }
                 val nextId = fresh.minOf { it.id }
                 if (nextId <= 0L || (fromId != 0L && nextId >= fromId)) {
-                    complete = true
-                    break
+                    return RemoteIndexScan(items, complete = true)
                 }
                 fromId = nextId
             }
-            return RemoteIndexScan(items, complete)
         }
+
+        /** Messages with a real id, excluding the boundary TDLib re-sends. */
+        private fun TdApi.Messages.newerThan(fromId: Long): List<TdApi.Message> =
+            messages.filter { it.id > 0L && (fromId == 0L || it.id < fromId) }
     }
 
     private data class RemoteIndexScan(
@@ -501,20 +517,6 @@ object BackupEngine {
         }
     }
 
-    private fun copyAndHash(
-        input: InputStream,
-        output: OutputStream,
-        digest: MessageDigest,
-    ) {
-        val buf = ByteArray(DEFAULT_BUFFER_SIZE)
-        while (true) {
-            val n = input.read(buf)
-            if (n < 0) break
-            output.write(buf, 0, n)
-            digest.update(buf, 0, n)
-        }
-    }
-
     /**
      * Copies a content URI into the cache so TDLib can send it by local path,
      * hashing the stream on the fly for exact dedupe. The suffix is preserved
@@ -535,7 +537,7 @@ object BackupEngine {
             (
                 item.displayName
                     .removeSuffix(suffix)
-                    .replace(Regex("[^A-Za-z0-9._-]"), "_")
+                    .replace(UNSAFE_NAME_CHARS, "_")
                     .take(baseLength) + suffix
             ).ifEmpty { "media" }
         val staged = File(dir, "${System.currentTimeMillis()}_${seq.incrementAndGet()}_$safeName")
@@ -544,13 +546,10 @@ object BackupEngine {
         return try {
             val input = context.contentResolver.openInputStream(item.uri) ?: return null
             input.use { source ->
-                staged.outputStream().use { output ->
-                    copyAndHash(source, output, digest)
-                }
+                staged.outputStream().use { output -> Hashing.copy(source, output, digest) }
             }
-            val contentHash = digest.digest().joinToString("") { "%02x".format(it) }
             complete = true
-            Staged(staged, contentHash)
+            Staged(staged, Hashing.hex(digest.digest()))
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {

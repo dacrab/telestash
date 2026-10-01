@@ -17,15 +17,12 @@ object BackupGate {
     suspend fun isBlocked(
         context: Context,
         settings: SettingsRepository,
-    ): String? {
-        if (settings.wifiOnly.first() && !isUnmetered(context)) return "Waiting for Wi-Fi"
-        if (settings.chargingOnly.first() && !isCharging(context)) return "Waiting for a charger"
-        return null
-    }
+    ): String? = waitReason(context, settings.wifiOnly.first(), settings.chargingOnly.first())
 
     /**
-     * Synchronous version for the gallery banner: reads the current connectivity
-     * and charging state from the already-collected prefs, no DataStore wait.
+     * Null when an implicit upload may proceed, otherwise why it must wait.
+     * The gallery banner calls this with the already-collected preferences, so
+     * it never waits on DataStore while recomposing.
      */
     fun waitReason(
         context: Context,
@@ -37,6 +34,7 @@ object BackupGate {
         return null
     }
 
+    /** Unknown network state is treated as metered, so we wait rather than guess. */
     private fun isUnmetered(context: Context): Boolean {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
         val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false

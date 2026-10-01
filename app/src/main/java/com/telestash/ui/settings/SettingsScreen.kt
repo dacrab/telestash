@@ -1,19 +1,5 @@
 package com.telestash.ui.settings
 
-import android.Manifest.permission.POST_NOTIFICATIONS
-import android.Manifest.permission.READ_EXTERNAL_STORAGE
-import android.Manifest.permission.READ_MEDIA_IMAGES
-import android.Manifest.permission.READ_MEDIA_VIDEO
-import android.Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
-import android.Manifest.permission.WRITE_EXTERNAL_STORAGE
-import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.net.Uri
-import android.os.Build
-import android.provider.Settings
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -36,6 +22,7 @@ import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -63,20 +50,19 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.AppViewModel
 import com.telestash.GalleryHealth
 import com.telestash.backup.BackupGate
 import com.telestash.device.DeviceFolder
 import com.telestash.device.DeviceMedia
+import com.telestash.ui.itemCount
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** Backup preferences, folder selection, maintenance, and account actions. */
-@Suppress("LongMethod")
 @Composable
 fun SettingsScreen(
     vm: AppViewModel,
@@ -95,35 +81,12 @@ fun SettingsScreen(
 
     val context = LocalContext.current
     val deviceFolders = remember { mutableStateListOf<DeviceFolder>() }
-    var hasMediaPermission by remember { mutableStateOf(hasGalleryAccess(context)) }
-    var hasPartialMediaPermission by remember { mutableStateOf(hasPartialGalleryAccess(context)) }
-    var hasNotificationPermission by remember { mutableStateOf(hasNotificationAccess(context)) }
-    var notificationPermissionDenied by remember { mutableStateOf(false) }
     var foldersLoading by remember { mutableStateOf(false) }
     var advancedOpen by remember { mutableStateOf(false) }
+    val permissions = rememberGalleryPermissions()
 
-    fun refreshPermissionState() {
-        hasMediaPermission = hasGalleryAccess(context)
-        hasPartialMediaPermission = hasPartialGalleryAccess(context)
-        hasNotificationPermission = hasNotificationAccess(context)
-    }
-
-    val permissionLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-            refreshPermissionState()
-        }
-    val notificationPermissionLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            hasNotificationPermission = granted
-            notificationPermissionDenied = !granted
-        }
-    val appSettingsLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            refreshPermissionState()
-        }
-
-    LaunchedEffect(hasMediaPermission, hasPartialMediaPermission) {
-        if (!hasMediaPermission) return@LaunchedEffect
+    LaunchedEffect(permissions.hasMediaAccess) {
+        if (!permissions.hasMediaAccess) return@LaunchedEffect
         foldersLoading = true
         try {
             val folders = withContext(Dispatchers.IO) { DeviceMedia.folders(context) }
@@ -139,25 +102,9 @@ fun SettingsScreen(
     }
 
     val waitReason =
-        remember(wifiOnly, chargingOnly, gallery.newMediaCount, uploadProgress) {
+        remember(wifiOnly, chargingOnly) {
             BackupGate.waitReason(context, wifiOnly, chargingOnly)
         }
-    val needsNotificationPermission =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNotificationPermission
-    val requestMediaPermission = { permissionLauncher.launch(neededPermissionsFor()) }
-    val requestNotificationPermission = {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            notificationPermissionLauncher.launch(POST_NOTIFICATIONS)
-        }
-    }
-    val openAppSettings = {
-        appSettingsLauncher.launch(
-            Intent(
-                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                Uri.fromParts("package", context.packageName, null),
-            ),
-        )
-    }
 
     Box(
         modifier =
@@ -180,8 +127,8 @@ fun SettingsScreen(
             item {
                 BackupStatusCard(
                     autoBackup = autoBackup,
-                    hasMediaPermission = hasMediaPermission,
-                    hasPartialMediaPermission = hasPartialMediaPermission,
+                    hasMediaPermission = permissions.hasMediaAccess,
+                    hasPartialMediaPermission = permissions.isPartial,
                     uploadProgress = uploadProgress,
                     pendingCount = gallery.newMediaCount,
                     waitReason = waitReason,
@@ -197,88 +144,31 @@ fun SettingsScreen(
                 wifiOnly = wifiOnly,
                 chargingOnly = chargingOnly,
                 instant = instant,
-                needsNotificationPermission = needsNotificationPermission,
-                notificationPermissionDenied = notificationPermissionDenied,
-                onRequestNotificationPermission = requestNotificationPermission,
-                onOpenAppSettings = openAppSettings,
+                notificationPermissionDenied = permissions.notificationsDenied,
+                onRequestNotificationPermission = permissions::requestNotifications,
+                onOpenAppSettings = permissions::openAppSettings,
             )
 
             foldersSection(
                 vm = vm,
                 autoBackup = autoBackup,
-                hasMediaPermission = hasMediaPermission,
-                hasPartialMediaPermission = hasPartialMediaPermission,
+                hasMediaPermission = permissions.hasMediaAccess,
+                hasPartialMediaPermission = permissions.isPartial,
                 foldersLoading = foldersLoading,
                 savedFolders = savedFolders,
                 deviceFolders = deviceFolders,
-                onRequestPermission = requestMediaPermission,
-                onLaunchSettings = openAppSettings,
+                onRequestPermission = permissions::requestBackupAccess,
+                onLaunchSettings = permissions::openAppSettings,
             )
 
-            item { SectionHeader("Photos") }
-            item {
-                SettingSwitch(
-                    label = "Skip duplicate media",
-                    description = "Skips items with the same exact SHA-256 content and uploads only one copy.",
-                    checked = dedupe,
-                    onCheckedChange = { vs -> vm.setDedupe(vs) },
-                )
-            }
-            item {
-                TextButton(onClick = { advancedOpen = !advancedOpen }) {
-                    Text(if (advancedOpen) "Hide advanced tools" else "Advanced tools")
-                }
-            }
-            if (advancedOpen) {
-                item {
-                    SettingSwitch(
-                        label = "Check Saved Messages",
-                        description =
-                            "Compares automatic main-library uploads with existing Saved Messages media; " +
-                                "candidate files may be downloaded once to verify an exact match; " +
-                                "album copies remain independent.",
-                        checked = remoteDedupe,
-                        enabled = dedupe,
-                        onCheckedChange = { vs -> vm.setRemoteDedupe(vs) },
-                    )
-                }
-                item { SectionHeader("Advanced maintenance") }
-                item { CleanupSection(vm) }
-            }
-
-            item { SectionHeader("Account") }
-            item {
-                Card(Modifier.fillMaxWidth()) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(16.dp),
-                    ) {
-                        Icon(
-                            Icons.Filled.CheckCircle,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text("Telegram connected", style = MaterialTheme.typography.titleMedium)
-                            Text(
-                                "Media is sent directly to your Telegram Saved Messages.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        TextButton(onClick = onLogout) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.Logout,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text("Log out")
-                        }
-                    }
-                }
-            }
+            mediaSection(
+                vm = vm,
+                dedupe = dedupe,
+                remoteDedupe = remoteDedupe,
+                advancedOpen = advancedOpen,
+                onToggleAdvanced = { advancedOpen = !advancedOpen },
+            )
+            accountSection(onLogout)
             item { Spacer(Modifier.height(24.dp)) }
         }
     }
@@ -290,7 +180,6 @@ private fun LazyListScope.backupSection(
     wifiOnly: Boolean,
     chargingOnly: Boolean,
     instant: Boolean,
-    needsNotificationPermission: Boolean,
     notificationPermissionDenied: Boolean,
     onRequestNotificationPermission: () -> Unit,
     onOpenAppSettings: () -> Unit,
@@ -301,12 +190,12 @@ private fun LazyListScope.backupSection(
             description = "Uploads the photos and videos in the chosen folders, then keeps new ones coming.",
             checked = autoBackup,
             onCheckedChange = { on ->
-                if (on && needsNotificationPermission) onRequestNotificationPermission()
+                if (on && MediaPermissions.needsNotificationPermission()) onRequestNotificationPermission()
                 vm.setAutoBackup(on, wifiOnly, chargingOnly)
             },
         )
     }
-    if (autoBackup && needsNotificationPermission) {
+    if (autoBackup && MediaPermissions.needsNotificationPermission()) {
         item {
             NotificationPermissionCard(
                 denied = notificationPermissionDenied,
@@ -676,29 +565,96 @@ private fun FolderRow(
     }
 }
 
-@Suppress("CyclomaticComplexMethod")
+/** Duplicate-skipping preference, plus the opt-in advanced tools behind it. */
+private fun LazyListScope.mediaSection(
+    vm: AppViewModel,
+    dedupe: Boolean,
+    remoteDedupe: Boolean,
+    advancedOpen: Boolean,
+    onToggleAdvanced: () -> Unit,
+) {
+    item { SectionHeader("Photos") }
+    item {
+        SettingSwitch(
+            label = "Skip duplicate media",
+            description = "Skips items with the same exact SHA-256 content and uploads only one copy.",
+            checked = dedupe,
+            onCheckedChange = vm::setDedupe,
+        )
+    }
+    item {
+        TextButton(onClick = onToggleAdvanced) {
+            Text(if (advancedOpen) "Hide advanced tools" else "Advanced tools")
+        }
+    }
+    if (!advancedOpen) return
+    item {
+        SettingSwitch(
+            label = "Check Saved Messages",
+            description =
+                "Compares automatic main-library uploads with existing Saved Messages media; " +
+                    "candidate files may be downloaded once to verify an exact match; " +
+                    "album copies remain independent.",
+            checked = remoteDedupe,
+            enabled = dedupe,
+            onCheckedChange = vm::setRemoteDedupe,
+        )
+    }
+    item { SectionHeader("Advanced maintenance") }
+    item { CleanupSection(vm) }
+}
+
+private fun LazyListScope.accountSection(onLogout: () -> Unit) {
+    item { SectionHeader("Account") }
+    item {
+        Card(Modifier.fillMaxWidth()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(16.dp),
+            ) {
+                Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Telegram connected", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Media is sent directly to your Telegram Saved Messages.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                TextButton(onClick = onLogout) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Logout,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text("Log out")
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Finds exact SHA-256 duplicate files in the cloud gallery and offers to delete
+ * the extras, keeping the oldest copy of each.
+ */
 @Composable
-private fun CleanupSection(vm: AppViewModel) {
+fun CleanupSection(vm: AppViewModel) {
     val scope = rememberCoroutineScope()
     var scanning by remember { mutableStateOf(false) }
+    var cleaning by remember { mutableStateOf(false) }
     var health by remember { mutableStateOf<GalleryHealth?>(null) }
     var scanError by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
-    var cleaning by remember { mutableStateOf(false) }
 
-    val summary = health
-    val summaryText =
-        when {
-            cleaning -> "Removing exact duplicates…"
-            scanError != null -> "Scan failed: ${scanError.orEmpty()}"
-            summary == null -> "Finds exact SHA-256 duplicate files and removes extras from Telegram."
-            summary.removableCount == 0 -> "Gallery is clean: no exact SHA-256 duplicates found."
-            else ->
-                "Found ${duplicateCount(summary.removableCount)} in " +
-                    "${groupCount(summary.duplicateGroups.size)}. The oldest copy of each is kept."
-        }
     Text(
-        summaryText,
+        cleanupSummary(cleaning, health, scanError),
         style = MaterialTheme.typography.bodySmall,
         color = if (scanError == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
@@ -708,7 +664,8 @@ private fun CleanupSection(vm: AppViewModel) {
         if (scanning) {
             CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
         } else {
-            TextButton(
+            CleanupScanButton(
+                busy = cleaning,
                 onClick = {
                     scanning = true
                     cleaning = false
@@ -726,94 +683,79 @@ private fun CleanupSection(vm: AppViewModel) {
                         }
                     }
                 },
-                enabled = !scanning && !cleaning,
-            ) { Text(if (health == null && !cleaning) "Scan now" else "Scan again") }
+            )
             if (!cleaning && (health?.removableCount ?: 0) > 0) {
                 TextButton(onClick = { confirmDelete = true }) { Text("Remove") }
             }
         }
     }
+
     if (confirmDelete) {
         val target = health
-        val removalCount = target?.removableCount ?: 0
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { confirmDelete = false },
-            title = {
-                Text(if (removalCount == 1) "Remove 1 item?" else "Remove $removalCount items?")
+        CleanupConfirmDialog(
+            removalCount = target?.removableCount ?: 0,
+            onConfirm = {
+                confirmDelete = false
+                val removal = target ?: return@CleanupConfirmDialog
+                health = null
+                cleaning = true
+                scope.launch {
+                    try {
+                        vm.cleanGallery(removal)
+                    } finally {
+                        cleaning = false
+                    }
+                }
             },
-            text = {
-                Text(
-                    "This permanently deletes them from your Telegram cloud. " +
-                        "The oldest copy of each exact SHA-256 duplicate is kept. This can't be undone.",
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        confirmDelete = false
-                        if (target != null) {
-                            health = null
-                            cleaning = true
-                            scope.launch {
-                                try {
-                                    vm.cleanGallery(target)
-                                } finally {
-                                    cleaning = false
-                                }
-                            }
-                        }
-                    },
-                ) { Text("Delete", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+            onDismiss = { confirmDelete = false },
         )
     }
 }
 
-private fun itemCount(count: Int): String = if (count == 1) "1 item" else "$count items"
+private fun cleanupSummary(
+    cleaning: Boolean,
+    health: GalleryHealth?,
+    scanError: String?,
+): String =
+    when {
+        cleaning -> "Removing exact duplicates…"
+        scanError != null -> "Scan failed: ${scanError.orEmpty()}"
+        health == null -> "Finds exact SHA-256 duplicate files and removes extras from Telegram."
+        health.removableCount == 0 -> "Gallery is clean: no exact SHA-256 duplicates found."
+        else ->
+            "Found ${duplicateCount(health.removableCount)} in " +
+                "${groupCount(health.duplicateGroups.size)}. The oldest copy of each is kept."
+    }
+
+@Composable
+private fun CleanupScanButton(
+    busy: Boolean,
+    onClick: () -> Unit,
+) = TextButton(onClick = onClick, enabled = !busy) {
+    Text("Scan now")
+}
+
+@Composable
+private fun CleanupConfirmDialog(
+    removalCount: Int,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) = AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text(if (removalCount == 1) "Remove 1 item?" else "Remove $removalCount items?") },
+    text = {
+        Text(
+            "This permanently deletes them from your Telegram cloud. " +
+                "The oldest copy of each exact SHA-256 duplicate is kept. This can't be undone.",
+        )
+    },
+    confirmButton = {
+        TextButton(onClick = onConfirm) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+    },
+    dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+)
 
 private fun duplicateCount(count: Int): String =
     if (count == 1) "1 exact SHA-256 duplicate" else "$count exact SHA-256 duplicates"
 
 private fun groupCount(count: Int): String = if (count == 1) "1 group" else "$count groups"
-
-private fun hasGalleryAccess(context: Context): Boolean =
-    (hasImageAccess(context) || hasVideoAccess(context) || hasSelectedMediaAccess(context)) &&
-        (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ||
-                ContextCompat.checkSelfPermission(context, WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-        )
-
-private fun hasImageAccess(context: Context): Boolean =
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        ContextCompat.checkSelfPermission(context, READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
-    } else {
-        ContextCompat.checkSelfPermission(context, READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-    }
-
-private fun hasVideoAccess(context: Context): Boolean =
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        ContextCompat.checkSelfPermission(context, READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
-    } else {
-        ContextCompat.checkSelfPermission(context, READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-    }
-
-private fun hasSelectedMediaAccess(context: Context): Boolean =
-    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
-        ContextCompat.checkSelfPermission(context, READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
-
-private fun hasPartialGalleryAccess(context: Context): Boolean =
-    hasGalleryAccess(context) && !(hasImageAccess(context) && hasVideoAccess(context))
-
-private fun hasNotificationAccess(context: Context): Boolean =
-    Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-        ContextCompat.checkSelfPermission(context, POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-
-private fun neededPermissionsFor(): Array<String> =
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-        arrayOf(READ_MEDIA_IMAGES, READ_MEDIA_VIDEO, READ_MEDIA_VISUAL_USER_SELECTED)
-    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        arrayOf(READ_MEDIA_IMAGES, READ_MEDIA_VIDEO)
-    } else {
-        arrayOf(READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE)
-    }

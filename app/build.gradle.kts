@@ -42,12 +42,16 @@ if (signRelease) {
     require(releaseTag != null) { "signRelease=true requires releaseTag" }
 }
 val releaseVersion = releaseTag?.removePrefix("v") ?: appVersion
+
+// Monotonic code from the version, so a tag always sorts above every earlier
+// one: major * 1e6 + minor * 1e3 + patch, each 0..999.
 val releaseVersionCode =
-    releaseTag?.let {
-        val parts = releaseVersion.substringBefore('-').split('.').map(String::toInt)
-        require(parts.size == 3 && parts.all { part -> part in 0..999 })
-        parts.fold(0) { code, part -> code * 1000 + part }
-    } ?: 3
+    releaseVersion.substringBefore('-').split('.').map(String::toInt).let { parts ->
+        require(parts.size == 3 && parts.all { it in 0..999 }) {
+            "Version $releaseVersion must be major.minor.patch with each part in 0..999"
+        }
+        parts[0] * 1_000_000 + parts[1] * 1_000 + parts[2]
+    }
 
 val keystoreFile = providers.environmentVariable("KEYSTORE_FILE").orNull
 val keystorePassword = providers.environmentVariable("KEYSTORE_PASSWORD").orNull
@@ -92,11 +96,24 @@ android {
             isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro",
             )
             if (signRelease) {
                 signingConfig = signingConfigs.getByName("release")
             }
+        }
+    }
+
+    // TDLib's native library is ~23 MB per ABI, so a single universal APK is
+    // ~95 MB and installs all four. Per-ABI APKs cut the download to ~25 MB;
+    // the universal APK stays as the fallback for anything the split misses.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86_64")
+            // x86 is dropped: 32-bit emulators are effectively gone, and it
+            // alone would add 27 MB to every install.
+            isUniversalApk = true
         }
     }
     compileOptions {

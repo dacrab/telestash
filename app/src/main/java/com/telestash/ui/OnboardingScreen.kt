@@ -119,15 +119,12 @@ private fun BrandHeader() {
 }
 
 /** Form to paste the Telegram API credentials and connect the account. */
-@Suppress("CyclomaticComplexMethod")
 @Composable
 private fun CredentialsCard(vm: AppViewModel) {
     var apiId by remember { mutableStateOf("") }
     var apiHash by remember { mutableStateOf("") }
-    var hashVisible by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
     val authError by vm.authError.collectAsStateWithLifecycle()
-
     val idValid = apiId.length >= MIN_API_ID_LENGTH
     val hashValid = apiHash.trim().length >= MIN_API_HASH_LENGTH
 
@@ -145,9 +142,7 @@ private fun CredentialsCard(vm: AppViewModel) {
             Text(
                 buildAnnotatedString {
                     append("Get them at ")
-                    withLink(LinkAnnotation.Url("https://my.telegram.org")) {
-                        append("my.telegram.org")
-                    }
+                    withLink(LinkAnnotation.Url("https://my.telegram.org")) { append("my.telegram.org") }
                     append(" → API development tools → Create an app.")
                 },
                 style = MaterialTheme.typography.bodySmall,
@@ -155,41 +150,9 @@ private fun CredentialsCard(vm: AppViewModel) {
                 modifier = Modifier.padding(vertical = 4.dp),
             )
             Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = apiId,
-                onValueChange = { apiId = it.filter { ch -> ch.isDigit() } },
-                label = { Text("App API ID") },
-                isError = apiId.isNotEmpty() && !idValid,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true,
-                enabled = !saving,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            ApiIdField(apiId, idValid, saving) { apiId = it.filter(Char::isDigit) }
             Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = apiHash,
-                onValueChange = { apiHash = it.trim() },
-                label = { Text("App API hash") },
-                visualTransformation =
-                    if (hashVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                trailingIcon = {
-                    IconButton(onClick = { hashVisible = !hashVisible }) {
-                        Icon(
-                            if (hashVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                            contentDescription = if (hashVisible) "Hide api_hash" else "Show api_hash",
-                        )
-                    }
-                },
-                isError = apiHash.isNotEmpty() && !hashValid,
-                supportingText = {
-                    if (apiHash.isNotEmpty() && !hashValid) {
-                        Text("Looks too short - copy the full api_hash")
-                    }
-                },
-                singleLine = true,
-                enabled = !saving,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            ApiHashField(apiHash, hashValid, saving, onChange = { apiHash = it.trim() })
             if (authError != null) {
                 Spacer(Modifier.height(4.dp))
                 Text(
@@ -203,9 +166,7 @@ private fun CredentialsCard(vm: AppViewModel) {
             Button(
                 onClick = {
                     saving = true
-                    vm.saveCredentials(apiId, apiHash).invokeOnCompletion {
-                        saving = false
-                    }
+                    vm.saveCredentials(apiId, apiHash).invokeOnCompletion { saving = false }
                 },
                 enabled = idValid && hashValid && !saving,
                 modifier = Modifier.fillMaxWidth(),
@@ -230,6 +191,54 @@ private fun CredentialsCard(vm: AppViewModel) {
             }
         }
     }
+}
+
+@Composable
+private fun ApiIdField(
+    value: String,
+    valid: Boolean,
+    enabled: Boolean,
+    onChange: (String) -> Unit,
+) = OutlinedTextField(
+    value = value,
+    onValueChange = onChange,
+    label = { Text("App API ID") },
+    isError = value.isNotEmpty() && !valid,
+    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+    singleLine = true,
+    enabled = enabled,
+    modifier = Modifier.fillMaxWidth(),
+)
+
+@Composable
+private fun ApiHashField(
+    value: String,
+    valid: Boolean,
+    enabled: Boolean,
+    onChange: (String) -> Unit,
+) {
+    var visible by remember { mutableStateOf(false) }
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text("App API hash") },
+        visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
+        trailingIcon = {
+            IconButton(onClick = { visible = !visible }) {
+                Icon(
+                    if (visible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                    contentDescription = if (visible) "Hide api_hash" else "Show api_hash",
+                )
+            }
+        },
+        isError = value.isNotEmpty() && !valid,
+        supportingText = {
+            if (value.isNotEmpty() && !valid) Text("Looks too short - copy the full api_hash")
+        },
+        singleLine = true,
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 @Composable

@@ -25,6 +25,7 @@ import com.telestash.ui.gallery.TimelineRow
 import com.telestash.util.Format
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -44,9 +45,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.drinkless.tdlib.TdApi
 
+/** Which Telegram login step the UI should show. */
 sealed interface AuthUi {
+    /** No api_id / api_hash stored yet: show the onboarding form. */
     data object NeedCredentials : AuthUi
 
+    /** TDLib is starting or replaying its session. */
     data object Loading : AuthUi
 
     data object Phone : AuthUi
@@ -59,6 +63,7 @@ sealed interface AuthUi {
         val hint: String,
     ) : AuthUi
 
+    /** Only reachable for a phone number that has no Telegram account yet. */
     data object Registration : AuthUi
 
     data object Ready : AuthUi
@@ -80,21 +85,13 @@ data class GalleryUi(
 )
 
 class AppViewModel(
-    app: Application,
+    private val app: Application,
 ) : AndroidViewModel(app) {
     companion object {
         const val MIN_API_HASH_LENGTH = 8
-        const val HISTORY_PAGE_SIZE = 100
-
-        /** Initial cloud-history sync cap; endless scroll appends beyond it. */
-        const val SYNC_MAX_ITEMS = 4000
-
-        /** Pages fetched per endless-scroll trigger (300 items). */
-        const val LOAD_MORE_PAGES = 3
         const val PICK_LIMIT = 100
-        const val SCROLL_PRELOAD_THRESHOLD = 12
-        const val BACKUP_INTERVAL_HOURS = 6L
-        const val BACKOFF_SECONDS = 30L
+
+        /** Media filter: -1 = all, 0 = photos only, 1 = videos only. */
         const val FILTER_ALL = -1
         const val FILTER_PHOTOS = 0
         const val FILTER_VIDEOS = 1
@@ -144,13 +141,9 @@ class AppViewModel(
             settings = settings,
             client = { client },
             toast = { message -> _toasts.tryEmit(message) },
-            historyPageSize = HISTORY_PAGE_SIZE,
-            syncMaxItems = SYNC_MAX_ITEMS,
-            loadMorePages = LOAD_MORE_PAGES,
-            albumCaptionPrefix = TgClient.ALBUM_CAPTION_PREFIX,
         )
     }
-    private val mediaStoreSaver by lazy { MediaStoreSaver(getApplication(), dao) }
+    private val mediaStoreSaver by lazy { MediaStoreSaver(app, dao) }
     private val selectionCoordinator by lazy {
         SelectionCoordinator(
             scope = viewModelScope,
@@ -163,7 +156,7 @@ class AppViewModel(
             toast = { message -> _toasts.tryEmit(message) },
         )
     }
-    private val backupScheduler by lazy { BackupScheduler(getApplication()) }
+    private val backupScheduler by lazy { BackupScheduler(app) }
 
     val autoBackup = settings.autoBackup
     val wifiOnly = settings.wifiOnly
@@ -173,7 +166,6 @@ class AppViewModel(
     val remoteDedupeEnabled = settings.remoteDedupeEnabled
     val instantUpload = settings.instantUpload
 
-    /** -1 = all media, 0 = photos only, 1 = videos only. */
     private val _mediaFilter = MutableStateFlow(FILTER_ALL)
     val mediaFilter: StateFlow<Int> = _mediaFilter.asStateFlow()
 
@@ -210,7 +202,7 @@ class AppViewModel(
      * separators are fused into the stream, and it rebuilds on topic or
      * filter change.
      */
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @OptIn(ExperimentalCoroutinesApi::class)
     val galleryPaging: Flow<PagingData<TimelineRow>> =
         combine(
             _gallery.map { it.openTopicId }.distinctUntilChanged(),
@@ -249,13 +241,13 @@ class AppViewModel(
 
     /** Watches MediaStore and either auto-uploads or banners new device media. */
     private val newMediaWatcher =
-        NewMediaWatcher(getApplication(), viewModelScope) { pending, autoUpload ->
+        NewMediaWatcher(app, viewModelScope) { pending, autoUpload ->
             _gallery.update { it.copy(newMediaCount = pending.size) }
+            // autoUpload already reflects the instant-upload preference; the gate
+            // in Uploader re-checks Wi-Fi/charging before any bytes move.
             if (autoUpload) {
                 viewModelScope.launch(Dispatchers.IO) {
-                    if (settings.autoBackup.first() && settings.instantUpload.first()) {
-                        uploadPendingItems(pending, auto = true)
-                    }
+                    if (settings.autoBackup.first()) uploadPendingItems(pending, auto = true)
                 }
             }
         }
@@ -267,13 +259,13 @@ class AppViewModel(
         sessionJob =
             viewModelScope.launch(Dispatchers.IO) {
                 try {
-                    BackupEngine.sweepStaleStaged(getApplication())
+                    BackupEngine.sweepStaleStaged(app)
                     val (apiId, apiHash) = settings.credentialsOnce()
                     if (apiId == 0 || apiHash.isBlank()) {
                         _auth.value = AuthUi.NeedCredentials
                         return@launch
                     }
-                    val c = TgClient.getOrCreate(getApplication(), apiId, apiHash)
+                    val c = TgClient.getOrCreate(app, apiId, apiHash)
                     client = c
                     observeGallery()
                     c.start()
@@ -327,24 +319,15 @@ class AppViewModel(
 
     private suspend fun prepareAccount(c: TgClient) {
         uploader.cancelAndJoin()
-        val userId = c.currentUserId()
-        val previousUserId = settings.telegramUserId()
-        val unownedData =
-            previousUserId == 0L &&
-                (
-                    dao.hasGalleryItems() ||
-                        dao.hasRemoteMedia() ||
-                        dao.allContentHashes().isNotEmpty() ||
-                        dao.allUploadedHashes().isNotEmpty()
-                )
-        if (unownedData || (previousUserId != 0L && previousUserId != userId)) {
-            gallerySync.resetForAccountChange()
+        val (userId, reset) = AccountGuard.ensureOwnedBy(c, settings, dao)
+        if (reset) {
+            gallerySync.resetState()
             BackupEngine.invalidateRemoteIndexCache()
             _selectedTab.value = TAB_PHOTOS
             _toasts.emit("Telegram account changed; local backup state was reset")
         }
         gallerySync.setAccountId(userId)
-        settings.setTelegramUserId(userId)
+        gallerySync.setRemoteDedupeEnabled(settings.remoteDedupeEnabled.first())
     }
 
     private suspend fun collectAuthStates(c: TgClient) {
@@ -509,18 +492,13 @@ class AppViewModel(
     private val uploader by lazy {
         Uploader(
             viewModelScope,
-            getApplication<Application>(),
+            app,
             dao,
             settings,
             { client },
             _uploadProgress,
             { count -> _gallery.update { gallery -> gallery.copy(newMediaCount = count) } },
         ) { msg -> _toasts.tryEmit(msg) }
-    }
-
-    /** Dismiss the "new media detected" banner without uploading. */
-    fun dismissNewMedia() {
-        _gallery.update { it.copy(newMediaCount = 0) }
     }
 
     fun uploadPending(auto: Boolean = false) = uploader.uploadPending(auto)
@@ -573,13 +551,7 @@ class AppViewModel(
         chargingOnly: Boolean,
     ) = viewModelScope.launch(Dispatchers.IO) {
         settings.setBackupPreferences(enabled, wifiOnly, chargingOnly)
-        backupScheduler.schedule(
-            enabled = enabled,
-            wifiOnly = wifiOnly,
-            chargingOnly = chargingOnly,
-            intervalHours = BACKUP_INTERVAL_HOURS,
-            backoffSeconds = BACKOFF_SECONDS,
-        )
+        backupScheduler.schedule(enabled, wifiOnly, chargingOnly)
         _toasts.tryEmit(if (enabled) "Auto-backup enabled" else "Auto-backup disabled")
     }
 
@@ -603,6 +575,10 @@ class AppViewModel(
     fun setRemoteDedupe(enabled: Boolean) =
         viewModelScope.launch(Dispatchers.IO) {
             settings.setRemoteDedupeEnabled(enabled)
+            // The remote_media ledger only exists for this feature, so start or
+            // stop maintaining it alongside the toggle.
+            gallerySync.setRemoteDedupeEnabled(enabled)
+            if (enabled) BackupEngine.invalidateRemoteIndexCache()
         }
 
     fun setInstantUpload(enabled: Boolean) =

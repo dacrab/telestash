@@ -48,11 +48,9 @@ class Uploader(
         const val MAX_FAILED_NAMES_IN_TOAST = 3
     }
 
-    /** Scans for not-yet-backed-up device media and uploads it (explicit action). */
+    /** Scans for not-yet-backed-up device media and uploads it. */
     fun uploadPending(auto: Boolean = false) {
-        launchTracked {
-            uploadInternal(null, auto, verb = "Backed up", updatesPendingCount = true)
-        }
+        launchTracked { run(null, auto = auto) }
     }
 
     /**
@@ -64,9 +62,7 @@ class Uploader(
         pending: List<PendingMedia>,
         auto: Boolean = false,
     ) {
-        launchTracked {
-            uploadInternal(pending, auto, verb = "Backed up", updatesPendingCount = true)
-        }
+        launchTracked { run(pending, auto = auto) }
     }
 
     /** Upload manually picked media, optionally into an album topic. */
@@ -75,8 +71,7 @@ class Uploader(
         topicId: Long = 0L,
     ): Job =
         launchTracked {
-            val c = client() ?: return@launchTracked
-            val pending =
+            val picks =
                 uris.mapNotNull { uri ->
                     val name = queryDisplayName(context.contentResolver, uri) ?: return@mapNotNull null
                     BackupEngine.pendingFromUri(
@@ -86,32 +81,34 @@ class Uploader(
                         querySize(context.contentResolver, uri),
                     )
                 }
-            if (pending.isEmpty()) return@launchTracked
-            uploadInternal(
-                pending,
-                auto = false,
-                verb = "Uploaded",
-                topicId = topicId,
-                updatesPendingCount = false,
-                resolvedClient = c,
-            )
+            // Manual picks never touch the pending banner: the user chose these
+            // files, so nothing about the device's not-yet-backed-up media changed.
+            run(picks, auto = false, topicId = topicId, updatesPendingCount = false)
         }
 
-    private suspend fun uploadInternal(
+    /**
+     * One upload pass. [pending] null means "scan the device first". [auto] marks
+     * an implicit background trigger, which is subject to the Wi-Fi/charging gate.
+     */
+    private suspend fun run(
         pending: List<PendingMedia>?,
         auto: Boolean,
-        verb: String,
         topicId: Long = 0L,
-        updatesPendingCount: Boolean,
-        resolvedClient: TgClient? = null,
+        updatesPendingCount: Boolean = true,
     ) {
-        if (!canUpload(auto)) return
-        val items = pending ?: BackupEngine.pending(context, dao, settings)
+        if (auto) {
+            val blocked = BackupGate.isBlocked(context, settings)
+            if (blocked != null) {
+                toast(blocked)
+                return
+            }
+        }
+        val items = pending ?: BackupEngine.pending(context, dao, settings.backupFolders.first())
         if (items.isEmpty()) {
             if (updatesPendingCount) setNewMediaCount(0)
             return
         }
-        val c = resolvedClient ?: client()
+        val c = client()
         if (c == null) {
             if (updatesPendingCount) setNewMediaCount(items.size)
             toast("Telegram is not connected")
@@ -122,23 +119,15 @@ class Uploader(
             return
         }
         try {
-            uploadItems(c, items, verb, topicId, updatesPendingCount)
+            uploadItems(c, items, topicId, updatesPendingCount)
         } finally {
             uploadInProgress.set(false)
         }
     }
 
-    private suspend fun canUpload(auto: Boolean): Boolean {
-        if (!auto) return true
-        val blocked = BackupGate.isBlocked(context, settings) ?: return true
-        toast(blocked)
-        return false
-    }
-
     private suspend fun uploadItems(
         c: TgClient,
         items: List<PendingMedia>,
-        verb: String,
         topicId: Long,
         updatesPendingCount: Boolean,
     ) {
@@ -153,44 +142,31 @@ class Uploader(
                     settings.dedupeEnabled.first(),
                     remoteDedupe = settings.remoteDedupeEnabled.first(),
                     topicId = topicId,
-                    onProgress = { done, total ->
-                        progress.value = UploadProgress(done, total)
-                    },
+                    onProgress = { done, total -> progress.value = UploadProgress(done, total) },
                 )
             if (updatesPendingCount) setNewMediaCount(summary.failed)
-            toast(uploadSummary(summary, verb))
+            toast(uploadSummary(summary))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            reportUploadFailure(e, items.size, updatesPendingCount)
+            if (updatesPendingCount) setNewMediaCount(items.size)
+            val message =
+                if (e is TdException && e.isFloodWait) {
+                    "Backup paused: Telegram asks to wait ${e.floodWaitSeconds}s"
+                } else {
+                    "Backup failed: ${e.message}"
+                }
+            toast(message)
         } finally {
             progress.value = null
         }
     }
 
-    private fun reportUploadFailure(
-        e: Exception,
-        itemCount: Int,
-        updatesPendingCount: Boolean,
-    ) {
-        if (updatesPendingCount) setNewMediaCount(itemCount)
-        val message =
-            if (e is TdException && e.isFloodWait) {
-                "Backup paused: Telegram asks to wait ${e.floodWaitSeconds}s"
-            } else {
-                "Backup failed: ${e.message}"
-            }
-        toast(message)
-    }
-
     /** Human-readable result for the toast. */
-    private fun uploadSummary(
-        s: BackupEngine.Summary,
-        verb: String,
-    ): String =
+    private fun uploadSummary(s: BackupEngine.Summary): String =
         buildString {
-            val uploaded = if (s.uploaded == 1) "1 item" else "${s.uploaded} items"
-            append("$verb $uploaded")
+            append("Backed up ")
+            append(if (s.uploaded == 1) "1 item" else "${s.uploaded} items")
             if (s.skipped > 0) append(", skipped ${s.skipped} already handled")
             if (s.failed > 0) {
                 append(", failed ${s.failed}")

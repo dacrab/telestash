@@ -89,12 +89,9 @@ fun AddToAlbumDialog(
 ) {
     var newAlbumName by remember(sourceAlbumId) { mutableStateOf("") }
     var chosenExisting by remember(sourceAlbumId) { mutableStateOf<Long?>(null) }
-    val trimmedName = newAlbumName.trim()
-    val duplicateName = trimmedName.isNotBlank() && albums.any { it.name.equals(trimmedName, ignoreCase = true) }
-    val countText = if (selectedCount == 1) "1 item" else "$selectedCount items"
-    val sourceText = sourceDescription(albums, sourceAlbumId)
-    val destinationText = destinationDescription(albums, chosenExisting, trimmedName)
-    val canMove = canMove(selectedCount, chosenExisting, sourceAlbumId, trimmedName, duplicateName)
+    val destination = AlbumDestination(albums, sourceAlbumId, chosenExisting, newAlbumName.trim())
+    val countText = itemCount(selectedCount)
+    val sourceText = destination.sourceText
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -110,10 +107,10 @@ fun AddToAlbumDialog(
                 Spacer(Modifier.height(12.dp))
                 NewAlbumNameField(
                     value = newAlbumName,
-                    duplicateName = duplicateName,
-                    destinationText = destinationText,
+                    destination = destination,
                     onValueChange = {
                         newAlbumName = it.take(MAX_ALBUM_NAME)
+                        // Typing a new name means that, not the highlighted album.
                         if (newAlbumName.isNotBlank()) chosenExisting = null
                     },
                 )
@@ -121,11 +118,11 @@ fun AddToAlbumDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = canMove,
+                enabled = destination.isValid,
                 onClick = {
                     vm.addSelectedToAlbum(
-                        albumTopicId = chosenExisting ?: 0L,
-                        newAlbumName = trimmedName.takeIf { it.isNotBlank() },
+                        albumTopicId = destination.existingTopicId,
+                        newAlbumName = destination.newAlbumName,
                     )
                     onDismiss()
                 },
@@ -179,55 +176,62 @@ private fun AlbumChoices(
 @Composable
 private fun NewAlbumNameField(
     value: String,
-    duplicateName: Boolean,
-    destinationText: String,
+    destination: AlbumDestination,
     onValueChange: (String) -> Unit,
 ) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text("New album name") },
-        isError = duplicateName,
+        isError = destination.isDuplicateName,
         supportingText = {
-            Text(if (duplicateName) "An album with this name already exists." else destinationText)
+            Text(
+                if (destination.isDuplicateName) {
+                    "An album with this name already exists."
+                } else {
+                    destination.destinationText
+                },
+            )
         },
         singleLine = true,
         modifier = Modifier.fillMaxWidth(),
     )
 }
 
-private fun sourceDescription(
+/**
+ * Where a "move to album" action would land: either a highlighted existing
+ * album or a name typed into the field. All the enable/duplicate/source-label
+ * rules live here instead of being spread across the dialog.
+ */
+private class AlbumDestination(
     albums: List<AlbumEntity>,
     sourceAlbumId: Long,
-): String {
-    val sourceName = albums.firstOrNull { it.topicId == sourceAlbumId }?.name
-    return when {
-        sourceName != null -> "from \"$sourceName\""
-        sourceAlbumId != 0L -> "from this album"
-        else -> "from your main library"
-    }
-}
-
-private fun destinationDescription(
-    albums: List<AlbumEntity>,
     selectedId: Long?,
     newName: String,
-): String {
-    val name =
-        selectedId?.let { id -> albums.firstOrNull { it.topicId == id }?.name }
-            ?: newName.takeIf { it.isNotBlank() }
-    return name?.let { "Destination: $it" } ?: "Choose a destination album."
-}
+) {
+    private val existingName = selectedId?.let { id -> albums.firstOrNull { it.topicId == id }?.name }
+    private val sourceName = albums.firstOrNull { it.topicId == sourceAlbumId }?.name
 
-private fun canMove(
-    selectedCount: Int,
-    selectedId: Long?,
-    sourceAlbumId: Long,
-    newName: String,
-    duplicateName: Boolean,
-): Boolean =
-    selectedCount > 0 &&
-        (
-            selectedId?.let { it != sourceAlbumId } == true ||
-                (newName.isNotBlank() && !duplicateName)
-        )
+    val newAlbumName: String? = if (existingName == null && newName.isNotBlank()) newName else null
+    val existingTopicId: Long = selectedId ?: 0L
+
+    val isDuplicateName: Boolean =
+        newName.isNotBlank() && albums.any { it.name.equals(newName, ignoreCase = true) }
+
+    val isValid: Boolean =
+        when {
+            selectedId != null -> selectedId != sourceAlbumId
+            else -> newName.isNotBlank() && !isDuplicateName
+        }
+
+    /** "from \"Family\"", "from this album", or "from your main library". */
+    val sourceText: String =
+        when {
+            sourceName != null -> "from \"$sourceName\""
+            sourceAlbumId != 0L -> "from this album"
+            else -> "from your main library"
+        }
+
+    val destinationText: String =
+        (existingName ?: newAlbumName)?.let { "Destination: $it" } ?: "Choose a destination album."
+}

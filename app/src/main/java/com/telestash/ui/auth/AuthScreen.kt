@@ -47,12 +47,18 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.AppViewModel
 import com.telestash.AuthUi
 import kotlinx.coroutines.delay
+import kotlin.math.ceil
 
 private const val MIN_PHONE_DIGITS = 8
 private const val RESEND_COOLDOWN_SECONDS = 60L
+private const val ONE_SECOND_MS = 1_000L
 
-/** One second between countdown ticks. */
-private const val RESEND_TICK_MS = 1_000L
+/** Digits, plus a single leading '+' — the only characters a phone number accepts. */
+private fun sanitizePhone(input: String): String =
+    input.trim().filterIndexed { index, ch -> ch.isDigit() || (ch == '+' && index == 0) }
+
+/** Shortest plausible E.164 number, so "Continue" only enables on real input. */
+private fun String.isSubmitable(): Boolean = length >= MIN_PHONE_DIGITS
 
 /** Telegram login steps with a branded header and a visible way to go back. */
 @Composable
@@ -64,7 +70,6 @@ fun AuthScreen(
     val error by vm.authError.collectAsStateWithLifecycle()
     // Keep the phone value while navigating between auth steps.
     var phone by remember { mutableStateOf("") }
-    val cleanPhone = phone.trim().filterIndexed { i, ch -> ch.isDigit() || (ch == '+' && i == 0) }
 
     Column(
         modifier =
@@ -100,8 +105,8 @@ fun AuthScreen(
         Spacer(Modifier.height(32.dp))
 
         when (state) {
-            is AuthUi.Phone -> PhoneStep(vm, busy, error, cleanPhone) { phone = it }
-            is AuthUi.Code -> CodeStep(vm, busy, state.hint, error, cleanPhone)
+            is AuthUi.Phone -> PhoneStep(vm, busy, error, phone, onPhoneChanged = { phone = it })
+            is AuthUi.Code -> CodeStep(vm, busy, state.hint, error, sanitizePhone(phone))
             is AuthUi.Password -> PasswordStep(vm, busy, state.hint, error)
             is AuthUi.Registration -> RegistrationStep(vm, busy, error)
             // Handled by the parent screen, which never routes them here.
@@ -136,10 +141,9 @@ private fun PhoneStep(
     phone: String,
     onPhoneChanged: (String) -> Unit,
 ) {
-    val cleaned = phone.filterIndexed { i, ch -> ch.isDigit() || (ch == '+' && i == 0) }
     OutlinedTextField(
         value = phone,
-        onValueChange = { onPhoneChanged(it.trim().filterIndexed { i, ch -> ch.isDigit() || (ch == '+' && i == 0) }) },
+        onValueChange = onPhoneChanged,
         label = { Text("Phone number") },
         placeholder = { Text("+15551234567") },
         isError = error != null,
@@ -150,9 +154,7 @@ private fun PhoneStep(
             ),
         keyboardActions =
             KeyboardActions(
-                onDone = {
-                    if (cleaned.length >= MIN_PHONE_DIGITS && !busy) vm.submitPhone(cleaned)
-                },
+                onDone = { if (phone.isSubmitable() && !busy) vm.submitPhone(phone) },
             ),
         singleLine = true,
         enabled = !busy,
@@ -161,8 +163,8 @@ private fun PhoneStep(
     ErrorText(error)
     Spacer(Modifier.height(16.dp))
     Button(
-        onClick = { vm.submitPhone(cleaned) },
-        enabled = cleaned.length >= MIN_PHONE_DIGITS && !busy,
+        onClick = { vm.submitPhone(phone) },
+        enabled = phone.isSubmitable() && !busy,
         modifier = Modifier.fillMaxWidth(),
     ) {
         if (busy) {
@@ -193,13 +195,19 @@ private fun CodeStep(
 ) {
     var code by remember { mutableStateOf("") }
     val digits = code.filter { ch -> ch.isDigit() }
+    // Wall-clock deadline for the next allowed resend; null means "ready now".
+    var resendDeadline by remember { mutableStateOf<Long?>(null) }
     var resendIn by remember { mutableLongStateOf(0L) }
-
-    LaunchedEffect(Unit) {
+    LaunchedEffect(resendDeadline) {
+        val deadline = resendDeadline ?: return@LaunchedEffect
         while (true) {
-            delay(RESEND_TICK_MS)
-            if (resendIn > 0) resendIn--
+            val left = ceil((deadline - System.currentTimeMillis()) / ONE_SECOND_MS.toDouble()).toLong()
+            if (left <= 0) break
+            resendIn = left
+            delay(ONE_SECOND_MS)
         }
+        resendIn = 0
+        resendDeadline = null
     }
 
     Surface(
@@ -258,7 +266,7 @@ private fun CodeStep(
         enabled = resendIn == 0L && !busy,
         onClick = {
             vm.submitPhone(phone)
-            resendIn = RESEND_COOLDOWN_SECONDS
+            resendDeadline = System.currentTimeMillis() + RESEND_COOLDOWN_SECONDS * ONE_SECOND_MS
         },
         modifier = Modifier.fillMaxWidth(),
     ) {
