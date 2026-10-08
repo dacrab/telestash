@@ -7,6 +7,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions: {}
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -31,10 +33,9 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          [[ -n "$KEYSTORE_BASE64" ]] || { printf '%s\n' '::error::KEYSTORE_BASE64 is required'; exit 1; }
-          [[ -n "$KEYSTORE_PASSWORD" ]] || { printf '%s\n' '::error::KEYSTORE_PASSWORD is required'; exit 1; }
-          [[ -n "$KEY_ALIAS" ]] || { printf '%s\n' '::error::KEY_ALIAS is required'; exit 1; }
-          [[ -n "$KEY_PASSWORD" ]] || { printf '%s\n' '::error::KEY_PASSWORD is required'; exit 1; }
+          for v in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            [[ -n "${!v}" ]] || { printf '::error::%s is required\n' "$v"; exit 1; }
+          done
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
           [[ -s "$RUNNER_TEMP/release.keystore" ]] || { printf '%s\n' '::error::The decoded keystore is empty'; exit 1; }
 
@@ -68,24 +69,5 @@ jobs:
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: telestash-*.apk
-          generate_release_notes: true
+          body_path: .github/release-notes.md
           prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
-          body: |
-            ## Installation
-
-            Download the APK for your phone and install it
-            (enable "install from unknown sources" if asked).
-
-            Nearly all modern phones are `arm64-v8a`; older 32-bit ones are
-            `armeabi-v7a`. If you are not sure, take the universal build —
-            it works everywhere but is much larger.
-
-            | File | Use on |
-            | --- | --- |
-            | `telestash-VERSION-arm64-v8a.apk` | almost all modern phones (recommended) |
-            | `telestash-VERSION-armeabi-v7a.apk` | older 32-bit phones |
-            | `telestash-VERSION-x86_64.apk` | emulators |
-            | `telestash-VERSION.apk` | any device, ~95 MB |
-
-            > All APKs are signed with the project release key.
-            > Verify you trust the source before installing.
