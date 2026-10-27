@@ -22,10 +22,21 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
+/** Progress of one upload batch; the derived values clamp bad provider counts. */
 data class UploadProgress(
     val done: Int,
     val total: Int,
-)
+) {
+    /** Guards against a provider reporting more done than total; negative totals read as 0. */
+    val safeTotal: Int get() = total.coerceAtLeast(0)
+
+    val safeDone: Int get() = done.coerceIn(0, safeTotal)
+
+    val fraction: Float get() = if (safeTotal > 0) safeDone.toFloat() / safeTotal else 0f
+
+    /** "42%" while running, blank once there is nothing to divide by. */
+    val percentLabel: String get() = if (safeTotal > 0) "${safeDone * 100 / safeTotal}%" else ""
+}
 
 /**
  * Thin UI-facing wrapper over [BackupEngine], which owns the upload, dedupe

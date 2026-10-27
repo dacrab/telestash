@@ -44,6 +44,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -70,16 +71,13 @@ private const val SKELETON_CELLS = 24
 /** How close to the loaded end the grid gets before paging in more. */
 private const val SCROLL_PRELOAD_THRESHOLD = 12
 
-/** Scale used to render a fraction as a whole-number percentage. */
-private const val PERCENT = 100
-
+/** The photo/video grid: filter tabs, month-separated rows, selection and the backup banner. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun GalleryScreen(
     vm: AppViewModel,
     gallery: GalleryUi,
     photos: LazyPagingItems<TimelineRow>,
-    uploadProgress: UploadProgress?,
     selectedTab: Int,
     openTopicId: Long,
     padding: PaddingValues,
@@ -87,6 +85,8 @@ fun GalleryScreen(
 ) {
     val gridState = rememberLazyGridState()
     val selecting = gallery.selected != null
+    // Collected here, not in the shell, so upload ticks don't recompose the whole app.
+    val uploadProgress by vm.uploadProgress.collectAsStateWithLifecycle()
     val mediaFilter by vm.mediaFilter.collectAsStateWithLifecycle()
     val inAlbum = selectedTab == AppViewModel.TAB_ALBUMS && openTopicId != 0L
     // The filter only makes sense for the main library, so it resets on navigation.
@@ -185,7 +185,8 @@ private fun GalleryBody(
 
             MediaGrid(
                 photos = photos,
-                gallery = gallery,
+                loadingMore = gallery.loadingMore,
+                hasMore = gallery.hasMore,
                 gridState = gridState,
                 selecting = selecting,
                 selected = gallery.selected,
@@ -251,7 +252,7 @@ private fun BackupStatusBanner(
 
 @Composable
 private fun BackupNotice(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     title: String,
     subtitle: String,
     action: String? = null,
@@ -298,9 +299,8 @@ private fun BackupNotice(
 @Composable
 private fun UploadProgressRow(progress: UploadProgress?) {
     if (progress == null) return
-    val total = progress.total.coerceAtLeast(0)
-    val done = progress.done.coerceIn(0, total)
-    val fraction = if (total > 0) done.toFloat() / total else 0f
+    val done = progress.safeDone
+    val total = progress.safeTotal
     Column(
         Modifier
             .fillMaxWidth()
@@ -317,13 +317,13 @@ private fun UploadProgressRow(progress: UploadProgress?) {
                 modifier = Modifier.weight(1f),
             )
             Text(
-                if (total > 0) "${(done * PERCENT / total)}%" else "",
+                progress.percentLabel,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         LinearProgressIndicator(
-            progress = { fraction },
+            progress = { progress.fraction },
             modifier = Modifier.fillMaxWidth(),
         )
     }
@@ -514,7 +514,8 @@ private fun MediaFilterRow(vm: AppViewModel) {
 @Composable
 private fun MediaGrid(
     photos: LazyPagingItems<TimelineRow>,
-    gallery: GalleryUi,
+    loadingMore: Boolean,
+    hasMore: Boolean,
     gridState: LazyGridState,
     selecting: Boolean,
     selected: Set<Long>?,
@@ -592,7 +593,7 @@ private fun MediaGrid(
                         )
                 }
             }
-            if (gallery.loadingMore) {
+            if (loadingMore) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     Box(
                         Modifier
@@ -601,7 +602,7 @@ private fun MediaGrid(
                         contentAlignment = Alignment.Center,
                     ) { CircularProgressIndicator() }
                 }
-            } else if (photos.itemCount > 0 && !gallery.hasMore) {
+            } else if (photos.itemCount > 0 && !hasMore) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     Text(
                         "End of library",
@@ -622,7 +623,7 @@ private fun MediaGrid(
 /** Fires [onLoadMore] when the grid nears its loaded end (endless scroll). */
 @Composable
 private fun EndlessScrollTrigger(
-    gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
+    gridState: LazyGridState,
     itemCount: Int,
     onLoadMore: () -> Unit,
 ) {
