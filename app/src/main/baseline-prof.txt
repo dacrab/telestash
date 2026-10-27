@@ -1,0 +1,23 @@
+# Hand-written baseline profile for startup and the gallery scroll path. The
+# AndroidX libraries ship their own measured profiles (merged in automatically),
+# so this only adds TeleStash's own classes plus the scroll frames the libraries
+# under-serve. Regenerate from a Macrobenchmark run once a device module exists.
+#
+# Flags: S = startup (AOT + class preload), H = hot, P = post-startup.
+# Only the app's own classes are marked S; the library packages stay HP so the
+# first run doesn't pay to preload thousands of classes it may not touch.
+HSPLcom/telestash/**->**(**)**
+HPLandroidx/compose/runtime/**->**(**)**
+HPLandroidx/compose/ui/platform/**->**(**)**
+HPLandroidx/compose/ui/node/**->**(**)**
+HPLandroidx/compose/ui/graphics/**->**(**)**
+HPLandroidx/compose/ui/layout/**->**(**)**
+HPLandroidx/compose/foundation/lazy/grid/**->**(**)**
+HPLandroidx/compose/foundation/lazy/**->**(**)**
+HPLandroidx/compose/foundation/gestures/**->**(**)**
+HPLandroidx/compose/material3/**->**(**)**
+HPLandroidx/paging/**->**(**)**
+HPLandroidx/room/**->**(**)**
+HPLcoil/**->**(**)**
+HPLkotlinx/coroutines/**->**(**)**
+HPLorg/drinkless/tdlib/**->**(**)**

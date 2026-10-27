@@ -13,19 +13,29 @@ import com.telestash.device.PendingMedia
 import com.telestash.td.TdException
 import com.telestash.td.TgClient
 import com.telestash.util.FileTypes
+import com.telestash.util.JobTracker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
+/** Progress of one upload batch; the derived values clamp bad provider counts. */
 data class UploadProgress(
     val done: Int,
     val total: Int,
-)
+) {
+    /** Guards against a provider reporting more done than total; negative totals read as 0. */
+    val safeTotal: Int get() = total.coerceAtLeast(0)
+
+    val safeDone: Int get() = done.coerceIn(0, safeTotal)
+
+    val fraction: Float get() = if (safeTotal > 0) safeDone.toFloat() / safeTotal else 0f
+
+    /** "42%" while running, blank once there is nothing to divide by. */
+    val percentLabel: String get() = if (safeTotal > 0) "${safeDone * 100 / safeTotal}%" else ""
+}
 
 /**
  * Thin UI-facing wrapper over [BackupEngine], which owns the upload, dedupe
@@ -42,7 +52,7 @@ class Uploader(
     private val toast: (String) -> Unit,
 ) {
     private val uploadInProgress = AtomicBoolean(false)
-    private val jobs = mutableSetOf<Job>()
+    private val jobs = JobTracker()
 
     companion object {
         const val MAX_FAILED_NAMES_IN_TOAST = 3
@@ -152,7 +162,12 @@ class Uploader(
             if (updatesPendingCount) setNewMediaCount(items.size)
             val message =
                 if (e is TdException && e.isFloodWait) {
-                    "Backup paused: Telegram asks to wait ${e.floodWaitSeconds}s"
+                    val secs = e.floodWaitSeconds
+                    if (secs != null) {
+                        "Backup paused: Telegram asks to wait ${secs}s"
+                    } else {
+                        "Backup paused: Telegram asked us to slow down"
+                    }
                 } else {
                     "Backup failed: ${e.message}"
                 }
@@ -175,7 +190,7 @@ class Uploader(
             }
             if (s.possibleRemoteMatches.isNotEmpty()) {
                 append(
-                    ", possible Saved Messages match(es) left unchanged: " +
+                    ". Couldn't rule out an existing Saved Messages copy of: " +
                         s.possibleRemoteMatches.joinToString(),
                 )
             }
@@ -203,17 +218,11 @@ class Uploader(
         }
     }
 
-    private fun launchTracked(block: suspend CoroutineScope.() -> Unit): Job {
-        val job = scope.launch(Dispatchers.IO) { block() }
-        synchronized(jobs) { jobs.add(job) }
-        job.invokeOnCompletion { synchronized(jobs) { jobs.remove(job) } }
-        return job
-    }
+    private fun launchTracked(block: suspend CoroutineScope.() -> Unit): Job = jobs.launchIo(scope, block)
 
+    /** Cancels every in-flight upload and clears the single-flight lock. */
     suspend fun cancelAndJoin() {
-        val current = synchronized(jobs) { jobs.toList().also { jobs.clear() } }
-        current.forEach { it.cancel() }
-        current.forEach { it.join() }
+        jobs.cancelAndJoin()
         uploadInProgress.set(false)
     }
 }

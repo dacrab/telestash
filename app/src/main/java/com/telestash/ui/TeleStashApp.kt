@@ -42,7 +42,6 @@ import androidx.paging.compose.collectAsLazyPagingItems
 import com.telestash.AppViewModel
 import com.telestash.AuthUi
 import com.telestash.GalleryUi
-import com.telestash.UploadProgress
 import com.telestash.data.TopicStats
 import com.telestash.model.StashItem
 import com.telestash.ui.albums.AlbumsScreen
@@ -63,7 +62,6 @@ fun TeleStashApp(
     authState: State<AuthUi>,
 ) {
     val gallery by vm.gallery.collectAsStateWithLifecycle()
-    val uploadProgress by vm.uploadProgress.collectAsStateWithLifecycle()
     val selectedTab by vm.selectedTab.collectAsStateWithLifecycle()
     val albumCounts by vm.albumCounts.collectAsStateWithLifecycle(initialValue = null)
     val photos = vm.galleryPaging.collectAsLazyPagingItems()
@@ -97,7 +95,7 @@ fun TeleStashApp(
                     gallery = gallery,
                     albumName = gallery.albums.find { it.topicId == openTopicId }?.name,
                     inAlbum = inAlbum,
-                    actions = rememberTopBarActions(vm, dialogs, photos),
+                    actions = rememberTopBarActions(vm, dialogs, photos, gallery),
                 )
             }
         },
@@ -123,7 +121,6 @@ fun TeleStashApp(
                     vm = vm,
                     gallery = gallery,
                     photos = photos,
-                    uploadProgress = uploadProgress,
                     selectedTab = selectedTab,
                     openTopicId = openTopicId,
                     albumCounts = albumCounts,
@@ -176,7 +173,6 @@ private fun TabContent(
     vm: AppViewModel,
     gallery: GalleryUi,
     photos: LazyPagingItems<TimelineRow>,
-    uploadProgress: UploadProgress?,
     selectedTab: Int,
     openTopicId: Long,
     albumCounts: List<TopicStats>?,
@@ -196,7 +192,6 @@ private fun TabContent(
                     vm = vm,
                     gallery = gallery,
                     photos = photos,
-                    uploadProgress = uploadProgress,
                     selectedTab = selectedTab,
                     openTopicId = openTopicId,
                     padding = padding,
@@ -205,7 +200,7 @@ private fun TabContent(
             } else {
                 AlbumsScreen(
                     albums = gallery.albums,
-                    counts = albumCounts.orEmpty().associate { it.topicId to it.count },
+                    counts = remember(albumCounts) { albumCounts.orEmpty().associate { it.topicId to it.count } },
                     countsLoaded = albumCounts != null,
                     isLoading = gallery.syncing,
                     padding = padding,
@@ -219,7 +214,6 @@ private fun TabContent(
                 vm = vm,
                 gallery = gallery,
                 photos = photos,
-                uploadProgress = uploadProgress,
                 selectedTab = selectedTab,
                 openTopicId = 0L,
                 padding = padding,
@@ -323,15 +317,16 @@ private fun chrome(
 /**
  * The top bars' callbacks never change identity while the VM and dialog state
  * live, but the delete action must read the current selection, so it reads the
- * gallery through a snapshot state.
+ * gallery through a snapshot state instead of re-collecting the flow.
  */
 @Composable
 private fun rememberTopBarActions(
     vm: AppViewModel,
     dialogs: DialogHostState,
     photos: LazyPagingItems<TimelineRow>,
+    gallery: GalleryUi,
 ): TopBarActions {
-    val galleryState = rememberUpdatedState(vm.gallery.collectAsStateWithLifecycle().value)
+    val galleryState = rememberUpdatedState(gallery)
     return remember(vm, dialogs) {
         TopBarActions(
             onCancelSelection = vm::exitSelectionMode,

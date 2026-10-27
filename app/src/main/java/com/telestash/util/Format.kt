@@ -11,18 +11,30 @@ object Format {
     private const val BYTES_PER_MB = BYTES_PER_KB * 1024
     private const val BYTES_PER_GB = BYTES_PER_MB * 1024
 
-    // Built once: these are called per grid cell, and ofPattern() is not cheap.
-    private val dateFormatter: DateTimeFormatter =
-        DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.getDefault())
-    private val monthFormatter: DateTimeFormatter =
-        DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault())
-    private val zone: ZoneId = ZoneId.systemDefault()
+    // Rebuilt when the locale or zone changes; ofPattern() is not cheap per cell.
+    @Volatile private var cache: FormatCache? = null
+
+    private class FormatCache(
+        val locale: Locale,
+        val zone: ZoneId,
+    ) {
+        val date = DateTimeFormatter.ofPattern("MMM d, yyyy", locale)
+        val month = DateTimeFormatter.ofPattern("MMMM yyyy", locale)
+    }
+
+    private fun cached(): FormatCache {
+        val locale = Locale.getDefault()
+        val zone = ZoneId.systemDefault()
+        val hit = cache
+        if (hit != null && hit.locale == locale && hit.zone == zone) return hit
+        return FormatCache(locale, zone).also { cache = it }
+    }
 
     /** "Sep 14, 2026" */
-    fun date(epochSec: Int): String = dateFormatter.format(atLocalTime(epochSec))
+    fun date(epochSec: Int): String = cached().let { it.date.format(atLocalTime(epochSec, it.zone)) }
 
     /** "September 2026" month bucket label for timeline headers. */
-    fun monthYear(epochSec: Int): String = monthFormatter.format(atLocalTime(epochSec))
+    fun monthYear(epochSec: Int): String = cached().let { it.month.format(atLocalTime(epochSec, it.zone)) }
 
     /** "3.4 MB" style byte size. */
     fun size(bytes: Long): String {
@@ -35,5 +47,8 @@ object Format {
         }
     }
 
-    private fun atLocalTime(epochSec: Int) = Instant.ofEpochSecond(epochSec.toLong()).atZone(zone)
+    private fun atLocalTime(
+        epochSec: Int,
+        zone: ZoneId,
+    ) = Instant.ofEpochSecond(epochSec.toLong()).atZone(zone)
 }

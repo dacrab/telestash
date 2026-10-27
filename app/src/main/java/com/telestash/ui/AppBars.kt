@@ -40,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -63,6 +64,7 @@ class TopBarActions(
     val onNewAlbum: () -> Unit,
 )
 
+/** Library/Albums navigation bar with the animated selected pill. */
 @Composable
 fun BottomNav(
     selected: Int,
@@ -78,7 +80,7 @@ fun BottomNav(
 private fun NavItem(
     tab: Int,
     label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     selected: Int,
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,

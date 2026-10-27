@@ -3,6 +3,7 @@ package com.telestash
 import android.app.Application
 import com.telestash.td.TgNativeLoader
 
+/** Application entry point; preloads TDLib's native library up front (see [TgNativeLoader]). */
 class TeleStashApplication : Application() {
     override fun onCreate() {
         super.onCreate()

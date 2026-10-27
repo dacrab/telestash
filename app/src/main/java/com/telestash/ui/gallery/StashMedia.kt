@@ -33,11 +33,15 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.telestash.model.StashItem
 import com.telestash.td.MediaPipeline
 import com.telestash.td.TgClient
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import net.engawapg.lib.zoomable.rememberZoomState
 import net.engawapg.lib.zoomable.zoomable
 import java.io.File
@@ -68,9 +72,8 @@ private sealed interface Resolved {
 
 /**
  * Resolves a gallery file to something displayable, cheapest source first:
- * the bytes TDLib already sent, an already-downloaded local file, the
- * thumbnail, then the full file. [thumbOnly] keeps grid cells and offscreen
- * viewer pages off the full-file download path.
+ * already-sent bytes, a local file, the thumbnail, then the full file.
+ * [thumbOnly] keeps grid cells and offscreen viewer pages off that last step.
  */
 @Composable
 private fun rememberResolved(
@@ -98,32 +101,35 @@ private fun rememberResolved(
 private suspend fun resolveStashItem(
     item: StashItem,
     thumbOnly: Boolean,
-): Resolved {
-    val mini = item.miniJpeg
-    // Already-downloaded bytes beat anything TDLib would fetch again.
-    val local = item.localPath?.takeIf { (!thumbOnly || !item.isVideo) && File(it).exists() }
-    if (local != null) return Resolved.Ready(local)
+): Resolved =
+    // Called from the composition's (main) dispatcher, so keep the file stats and
+    // the tail of MediaPipeline.resolve off the UI thread.
+    withContext(Dispatchers.IO) {
+        val mini = item.miniJpeg
+        // Already-downloaded bytes beat anything TDLib would fetch again.
+        val local = item.localPath?.takeIf { (!thumbOnly || !item.isVideo) && File(it).exists() }
+        if (local != null) return@withContext Resolved.Ready(local)
 
-    val client = TgClient.peek()
-    val thumb =
-        if (thumbOnly && item.thumbFileId != 0) {
-            MediaPipeline.resolve(client, item.thumbFileId, fullFile = false)
-        } else {
-            null
+        val client = TgClient.peek()
+        val thumb =
+            if (thumbOnly && item.thumbFileId != 0) {
+                MediaPipeline.resolve(client, item.thumbFileId, fullFile = false)
+            } else {
+                null
+            }
+        if (thumb != null) return@withContext Resolved.Ready(thumb)
+        if (thumbOnly && item.isVideo) {
+            // Don't pull a whole video just to draw a grid cell.
+            return@withContext if (mini != null) Resolved.Mini(mini) else Resolved.VideoBadge
         }
-    if (thumb != null) return Resolved.Ready(thumb)
-    if (thumbOnly && item.isVideo) {
-        // Don't pull a whole video just to draw a grid cell.
-        return if (mini != null) Resolved.Mini(mini) else Resolved.VideoBadge
-    }
 
-    val full = MediaPipeline.resolve(client, item.fileId, fullFile = true)
-    return when {
-        full != null -> Resolved.Ready(full)
-        thumbOnly && mini != null -> Resolved.Mini(mini)
-        else -> Resolved.Failed
+        val full = MediaPipeline.resolve(client, item.fileId, fullFile = true)
+        when {
+            full != null -> Resolved.Ready(full)
+            thumbOnly && mini != null -> Resolved.Mini(mini)
+            else -> Resolved.Failed
+        }
     }
-}
 
 /** Renders a photo: instant minithumbnail first, full file with crossfade next. */
 @Composable
@@ -170,7 +176,9 @@ fun StashImage(
                             ImageRequest
                                 .Builder(context)
                                 .data(File(resolved.path))
-                                .crossfade(true)
+                                // Grid cells appear by the dozen during a fling; animating
+                                // each one in is wasted frame time. Keep it for full-size.
+                                .crossfade(!thumbOnly)
                         if (thumbOnly) builder.size(GRID_CELL_DECODE_SIZE, GRID_CELL_DECODE_SIZE)
                         builder.build()
                     }
@@ -264,7 +272,7 @@ fun VideoPlayer(
     }
 
     val readyPath = (resolved as? Resolved.Ready)?.path
-    if (readyPath != null && File(readyPath).exists()) {
+    if (readyPath != null) {
         val exo =
             remember(readyPath) {
                 ExoPlayer.Builder(context).build().apply {
@@ -278,7 +286,7 @@ fun VideoPlayer(
         DisposableEffect(exo) { onDispose { exo.release() } }
         AndroidView(
             factory = { ctx ->
-                androidx.media3.ui.PlayerView(ctx).apply {
+                PlayerView(ctx).apply {
                     player = exo
                     layoutParams =
                         ViewGroup.LayoutParams(
@@ -287,7 +295,7 @@ fun VideoPlayer(
                         )
                     useController = true
                     // FIT shows portrait video correctly instead of forcing 16:9.
-                    resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 }
             },
             modifier = Modifier.fillMaxSize(),
