@@ -61,13 +61,11 @@ data class ItemEntity(
 @Entity(tableName = "uploads")
 data class UploadedEntity(
     @PrimaryKey val contentHash: String,
-    val fileName: String,
-    val sizeBytes: Long,
     /** MediaStore content URI it was uploaded from, if still on this device. */
     val deviceUri: String? = null,
-    val uploadedAt: Long,
 )
 
+/** Index of one Saved Messages media message for [accountId], used for remote dedupe. */
 @Entity(
     tableName = "remote_media",
     primaryKeys = ["accountId", "messageId"],
@@ -92,12 +90,16 @@ data class RemoteMediaEntity(
     @ColumnInfo(defaultValue = "'document'") val remoteType: String = "document",
 )
 
+/** A Saved Messages topic the user has added as an album. */
 @Entity(tableName = "albums")
 data class AlbumEntity(
     @PrimaryKey val topicId: Long,
     val name: String,
     val order: Long,
 )
+
+/** SQLite caps bind parameters at 999 below API 31, so `IN (:ids)` lists are chunked. */
+const val SQL_BIND_CHUNK = 500
 
 @Dao
 interface ItemDao {
@@ -122,7 +124,11 @@ interface ItemDao {
     suspend fun allContentHashes(): List<String>
 
     @Query("SELECT * FROM items WHERE messageId IN (:ids) ORDER BY date DESC, messageId DESC")
-    suspend fun itemsByIds(ids: List<Long>): List<ItemEntity>
+    suspend fun itemsInChunk(ids: List<Long>): List<ItemEntity>
+
+    /** Chunked so no caller can exceed SQLite's bind-parameter ceiling. */
+    @Transaction
+    suspend fun itemsByIds(ids: List<Long>): List<ItemEntity> = ids.chunked(SQL_BIND_CHUNK).flatMap { itemsInChunk(it) }
 
     @Query("SELECT EXISTS(SELECT 1 FROM items)")
     suspend fun hasGalleryItems(): Boolean
@@ -130,9 +136,13 @@ interface ItemDao {
     @Query("SELECT EXISTS(SELECT 1 FROM remote_media)")
     suspend fun hasRemoteMedia(): Boolean
 
+    @Query("SELECT EXISTS(SELECT 1 FROM uploads)")
+    suspend fun hasUploads(): Boolean
+
     @Query("SELECT contentHash FROM uploads")
     suspend fun allUploadedHashes(): List<String>
 
+    /** Remote rows that could match an upload of this size/kind, newest first. */
     @Query(
         "SELECT * FROM remote_media " +
             "WHERE accountId = :accountId AND topicId = :topicId " +
@@ -206,6 +216,7 @@ interface ItemDao {
         remoteType: String,
     ): Int
 
+    /** Updates the row if it exists, otherwise inserts it. */
     @Transaction
     suspend fun upsertRemoteMedia(items: List<RemoteMediaEntity>) {
         items.forEach { item ->
@@ -231,11 +242,21 @@ interface ItemDao {
     }
 
     @Query("DELETE FROM remote_media WHERE accountId = :accountId AND messageId IN (:ids)")
-    suspend fun deleteRemoteMediaByMessageIds(
+    suspend fun deleteRemoteMediaInChunk(
         accountId: Long,
         ids: List<Long>,
     )
 
+    /** Chunked; see [itemsByIds]. */
+    @Transaction
+    suspend fun deleteRemoteMediaByMessageIds(
+        accountId: Long,
+        ids: List<Long>,
+    ) {
+        ids.chunked(SQL_BIND_CHUNK).forEach { deleteRemoteMediaInChunk(accountId, it) }
+    }
+
+    /** Unique-id → content hash for main-chat rows that already have a hash. */
     @Query(
         "SELECT remoteUniqueId, contentHash FROM remote_media " +
             "WHERE accountId = :accountId AND topicId = 0 AND contentHash IS NOT NULL",
@@ -245,6 +266,7 @@ interface ItemDao {
     @Query("DELETE FROM remote_media WHERE accountId = :accountId AND topicId = 0")
     suspend fun clearMainRemoteMediaForAccount(accountId: Long)
 
+    /** Rewrites the main-chat index, carrying over hashes already computed for kept ids. */
     @Transaction
     suspend fun replaceRemoteMedia(
         accountId: Long,
@@ -265,6 +287,7 @@ interface ItemDao {
     @Query("SELECT name FROM albums WHERE topicId = :topicId")
     suspend fun albumName(topicId: Long): String?
 
+    /** Every device URI known to the gallery or the upload ledger, for "already backed up" checks. */
     @Query(
         "SELECT deviceUri FROM items WHERE deviceUri IS NOT NULL " +
             "UNION SELECT deviceUri FROM uploads WHERE deviceUri IS NOT NULL",
@@ -281,6 +304,7 @@ interface ItemDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertRemoteIfAbsent(item: ItemEntity)
 
+    /** Merges a sync row into an existing item, keeping any local path/thumbnail already set. */
     @Query(
         """
         UPDATE items SET
@@ -346,9 +370,15 @@ interface ItemDao {
     fun observeTopicCounts(): Flow<List<TopicStats>>
 
     @Query("DELETE FROM items WHERE messageId IN (:ids)")
-    suspend fun deleteAll(ids: List<Long>)
+    suspend fun deleteInChunk(ids: List<Long>)
 
-    /** Everything scoped to one account: gallery, albums and the remote index. */
+    /** Deletes gallery rows by message id. Chunked; see [itemsByIds]. */
+    @Transaction
+    suspend fun deleteByIds(ids: List<Long>) {
+        ids.chunked(SQL_BIND_CHUNK).forEach { deleteInChunk(it) }
+    }
+
+    /** Deletes every gallery row; albums and the remote index are untouched. */
     @Query("DELETE FROM items")
     suspend fun clearItems()
 
@@ -361,12 +391,14 @@ interface ItemDao {
     @Query("DELETE FROM remote_media")
     suspend fun clearRemoteMedia()
 
+    /** Clears the gallery and its albums (an account switch, not a full wipe). */
     @Transaction
     suspend fun clearGalleryData() {
         clearItems()
         clearAlbums()
     }
 
+    /** Full reset: gallery, albums, remote index and the upload ledger. */
     @Transaction
     suspend fun clearAllAccountData() {
         clearGalleryData()
@@ -376,12 +408,9 @@ interface ItemDao {
 }
 
 /**
- * Rebuilds `items` in the current shape and adds the tables that arrived with
- * it, carrying rows forward from [fromVersion].
- *
- * v0.3.0 is the only public release and it shipped schema 2. Schemas 1 and 3
- * to 7 only ever existed in development builds, so these are the only two
- * upgrade paths that have to keep working; Room replays one on next app start.
+ * Rebuilds `items` in the current shape and adds the newer tables, carrying rows
+ * forward. v0.2.0 (schema 1) and v0.3.0 (schema 2) are the only upgrade paths
+ * that have to keep working; Room replays one on next app start.
  */
 private fun migrateToCurrent(
     db: SupportSQLiteDatabase,
@@ -473,10 +502,7 @@ private val CREATE_UPLOADS =
     """
     CREATE TABLE `uploads` (
         `contentHash` TEXT NOT NULL,
-        `fileName` TEXT NOT NULL,
-        `sizeBytes` INTEGER NOT NULL,
         `deviceUri` TEXT,
-        `uploadedAt` INTEGER NOT NULL,
         PRIMARY KEY(`contentHash`)
     )
     """.trimIndent()
@@ -500,13 +526,13 @@ private val CREATE_REMOTE_MEDIA =
     )
     """.trimIndent()
 
-val MIGRATION_1_8 =
-    object : Migration(1, 8) {
+val MIGRATION_1_9 =
+    object : Migration(1, 9) {
         override fun migrate(db: SupportSQLiteDatabase) = migrateToCurrent(db, 1)
     }
 
-val MIGRATION_2_8 =
-    object : Migration(2, 8) {
+val MIGRATION_2_9 =
+    object : Migration(2, 9) {
         override fun migrate(db: SupportSQLiteDatabase) = migrateToCurrent(db, 2)
     }
 
@@ -517,22 +543,24 @@ val MIGRATION_2_8 =
         UploadedEntity::class,
         RemoteMediaEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = true,
 )
 abstract class StashDb : RoomDatabase() {
     abstract fun itemDao(): ItemDao
 }
 
+/** Projection of [ItemDao.knownRemoteMediaHashes]. */
 data class RemoteMediaHash(
     val remoteUniqueId: String,
     val contentHash: String,
 )
 
+/** Rows with exact-content evidence for duplicate grouping (hash never null or empty here). */
 data class ExactHashCandidate(
     val messageId: Long,
     val chatId: Long,
-    val contentHash: String?,
+    val contentHash: String,
 )
 
 /** Row projection of [ItemDao.observeTopicCounts]. */

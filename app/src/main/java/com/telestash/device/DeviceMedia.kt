@@ -37,10 +37,8 @@ data class PendingMedia(
 )
 
 /**
- * Shared MediaStore queries for the backup worker, the new-media watcher and
- * the settings folder list. Trashed, pending, hidden (dot-prefixed) and
- * `.nomedia`-guarded media is always skipped so deleted files and app junk
- * (stickers, cache images) are never backed up — same as Google Photos.
+ * Shared MediaStore queries for the backup worker, new-media watcher and folder
+ * list. Trashed, pending, dot-hidden and `.nomedia`-guarded media is skipped.
  */
 object DeviceMedia {
     /** Levels from getExternalFilesDir (…/Android/data/<pkg>/files) up to the volume root. */
@@ -66,8 +64,10 @@ object DeviceMedia {
         }
     }
 
+    /** Image collection across all external volumes. */
     fun imageCollection(): Uri = collection(images = true)
 
+    /** Video collection across all external volumes. */
     fun videoCollection(): Uri = collection(images = false)
 
     /** Primary-volume image collection, for saving downloads back to the gallery. */
@@ -131,6 +131,20 @@ object DeviceMedia {
         return counts
     }
 
+    /**
+     * MediaStore visibility filter for this Android version. IS_PENDING exists
+     * since API 29, but IS_TRASHED only since API 30 — referencing it earlier
+     * throws IllegalArgumentException, so the levels are kept apart.
+     */
+    private fun visibilitySelection(): String? =
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                "${MediaStore.MediaColumns.IS_TRASHED} = 0 AND ${MediaStore.MediaColumns.IS_PENDING} = 0"
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                "${MediaStore.MediaColumns.IS_PENDING} = 0"
+            else -> null
+        }
+
     /** Query one collection, skipping trashed/pending/hidden rows. */
     private fun forEachVisible(
         context: Context,
@@ -160,12 +174,7 @@ object DeviceMedia {
                     pathColumn,
                 )
             }
-        val selection =
-            if (modern) {
-                "${MediaStore.MediaColumns.IS_TRASHED} = 0 AND ${MediaStore.MediaColumns.IS_PENDING} = 0"
-            } else {
-                null
-            }
+        val selection = visibilitySelection()
         // .nomedia verdicts, cached per directory for the whole scan.
         val hiddenDirs = mutableMapOf<String, Boolean>()
         context.contentResolver
@@ -220,10 +229,8 @@ object DeviceMedia {
     }
 
     /**
-     * True when a `.nomedia` file in the row's own directory or any ancestor
-     * hides it (stickers, app cache images…), like Google Photos does.
-     * Verdicts are cached per directory in [cache]. Unknown volumes resolve
-     * to false (never skip what can't be proven hidden).
+     * True when a `.nomedia` in the row's own directory or any ancestor hides
+     * it. Verdicts are cached per directory; unknown volumes resolve to false.
      */
     private fun isNoMediaDir(
         context: Context,
@@ -241,9 +248,7 @@ object DeviceMedia {
 
     /**
      * Ancestor directories of this row, innermost first; empty when the volume
-     * can't be resolved (then nothing is treated as hidden). Pre-Q rows carry
-     * an absolute DATA path; Q+ rows a volume-relative path on the primary
-     * volume (SD-card rows stay unchecked, i.e. current behavior).
+     * can't be resolved (nothing is then treated as hidden).
      */
     private fun ancestorDirs(
         context: Context,
@@ -261,12 +266,8 @@ object DeviceMedia {
     }
 
     /**
-     * Primary shared-storage root, needed to turn a Q+ RELATIVE_PATH into real
-     * directories. Uses [StorageVolume.getDirectory] where available; older
-     * releases fall back to walking up from the app's external files dir
-     * (…/Android/data/<pkg>/files, four levels up), which is the only route
-     * left once Environment.getExternalStorageDirectory is off the table.
-     * Null when it can't be determined, in which case nothing is treated hidden.
+     * Primary shared-storage root, used to turn a Q+ RELATIVE_PATH into real
+     * directories. Null when unknown, in which case nothing is treated hidden.
      */
     private fun primaryVolumeRoot(context: Context): File? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

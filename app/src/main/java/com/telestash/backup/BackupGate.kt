@@ -8,12 +8,12 @@ import com.telestash.data.SettingsRepository
 import kotlinx.coroutines.flow.first
 
 /**
- * Applies the user's Wi-Fi/charging preferences to implicit auto-uploads (the
- * new-media watcher and toggling instant upload on). WorkManager enforces the
- * same constraints for the periodic worker natively; explicit user actions
- * (the banner button, manual picks) always bypass the gate.
+ * Applies the user's Wi-Fi/charging preferences to implicit uploads (the
+ * new-media watcher, toggling instant upload on). Explicit user actions always
+ * bypass the gate; WorkManager enforces the same constraints natively.
  */
 object BackupGate {
+    /** Reads the stored preferences and reports why an implicit upload must wait, or null. */
     suspend fun isBlocked(
         context: Context,
         settings: SettingsRepository,
@@ -36,11 +36,12 @@ object BackupGate {
 
     /** Unknown network state is treated as metered, so we wait rather than guess. */
     private fun isUnmetered(context: Context): Boolean {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
         val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
     }
 
+    /** Likewise an unavailable battery service is not evidence of charging. */
     private fun isCharging(context: Context): Boolean {
         val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager ?: return false
         return bm.isCharging

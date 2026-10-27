@@ -12,6 +12,7 @@ import com.telestash.model.messageToRemoteMedia
 import com.telestash.model.toEntity
 import com.telestash.td.TdException
 import com.telestash.td.TgClient
+import com.telestash.util.FileTypes
 import com.telestash.util.Hashing
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
@@ -22,10 +23,9 @@ import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Single upload engine for every path: the periodic worker, the in-app
- * "back up now" flow and manual picks all funnel through [backupAll]. Stages
- * the device file, dedupes, sends it as a document to Saved Messages and
- * records it in Room — all under one process-wide lock.
+ * Upload engine for every path — the worker, "back up now" and manual picks all
+ * funnel through [backupAll]. Stages the file, dedupes, sends it to Saved
+ * Messages and records it in Room, all under one lock.
  */
 object BackupEngine {
     enum class Outcome { UPLOADED, SKIPPED, FAILED }
@@ -35,6 +35,7 @@ object BackupEngine {
         val possibleRemoteMatch: Boolean = false,
     )
 
+    /** Tally of one backup pass; the lists name the files behind the counts. */
     data class Summary(
         val uploaded: Int,
         val skipped: Int,
@@ -49,7 +50,7 @@ object BackupEngine {
 
     private const val STAGING_DIR = "backup"
     private const val STAGED_TTL_MS = 24L * 60 * 60 * 1000
-    private const val MAX_STAGED_NAME_LENGTH = 120
+    private const val MAX_STAGED_SUFFIX_LENGTH = 20
     private const val REMOTE_INDEX_PAGE_SIZE = 100
     private const val REMOTE_INDEX_CACHE_MS = 5L * 60 * 1000
     private const val REMOTE_INDEX_UPSERT_CHUNK = 500
@@ -62,9 +63,6 @@ object BackupEngine {
         val file: File,
         val contentHash: String,
     )
-
-    /** Anything outside this set is replaced in staged file names. */
-    private val UNSAFE_NAME_CHARS = Regex("[^A-Za-z0-9._-]")
 
     private val backupMutex = Mutex()
 
@@ -85,6 +83,7 @@ object BackupEngine {
         }
     }
 
+    /** Drops the cached Saved Messages index so the next pass re-scans it. */
     suspend fun invalidateRemoteIndexCache() {
         SavedMessagesIndex.invalidate()
     }
@@ -265,6 +264,8 @@ object BackupEngine {
             staged: Staged,
         ): UploadResult {
             dao.upsertUploaded(listOf(uploadedEntity(item, staged.contentHash)))
+            // Lets a later copy of the same bytes skip staging and re-hashing.
+            knownHashes += staged.contentHash
             return UploadResult(Outcome.SKIPPED)
         }
 
@@ -313,9 +314,7 @@ object BackupEngine {
         for (candidate in allCandidates.take(MAX_REMOTE_CANDIDATES).filter { it.fileId > 0 }) {
             when (verifyCandidate(client, dao, accountId, candidate, budget, contentHash)) {
                 CandidateMatch.EXACT -> return RemoteDuplicateCheck(exact = true)
-                // Either the bytes differ, or we could not prove they do.
-                CandidateMatch.HASH_MISMATCH, CandidateMatch.UNVERIFIED -> possible = true
-                CandidateMatch.OTHER -> Unit
+                CandidateMatch.UNVERIFIED -> possible = true
             }
         }
         return RemoteDuplicateCheck(possible = possible)
@@ -325,21 +324,15 @@ object BackupEngine {
         /** Byte-identical to the file being uploaded: do not upload it again. */
         EXACT,
 
-        /** Hashed and confirmed different. */
-        OTHER,
-
-        /** Hashed and different, but the upload ledger still needs warning. */
-        HASH_MISMATCH,
-
         /** Could not be resolved; may or may not be a duplicate. */
         UNVERIFIED,
     }
 
     /**
      * Compares one Saved Messages candidate against the file being uploaded,
-     * reusing the indexed hash when there is one and otherwise spending
-     * download budget to compute it. Anything unresolvable is UNVERIFIED, so
-     * the caller warns instead of silently uploading a possible duplicate.
+     * reusing an indexed hash or spending download budget. Only an exact match
+     * counts as resolved; anything else is UNVERIFIED, so the caller warns
+     * instead of silently duplicating.
      */
     private suspend fun verifyCandidate(
         client: TgClient,
@@ -356,8 +349,7 @@ object BackupEngine {
                     remoteFileExists(client, candidate)
             return when {
                 !live -> CandidateMatch.UNVERIFIED
-                known != contentHash -> CandidateMatch.HASH_MISMATCH
-                client.messageExists(candidate.chatId, candidate.messageId) -> CandidateMatch.EXACT
+                known == contentHash -> CandidateMatch.EXACT
                 else -> CandidateMatch.UNVERIFIED
             }
         }
@@ -365,7 +357,7 @@ object BackupEngine {
         budget.remainingBytes -= candidate.sizeBytes
         val hash = hashRemoteFile(client, candidate) ?: return CandidateMatch.UNVERIFIED
         dao.updateRemoteMediaHash(accountId, candidate.remoteUniqueId, hash)
-        return if (hash == contentHash) CandidateMatch.OTHER else CandidateMatch.HASH_MISMATCH
+        return if (hash == contentHash) CandidateMatch.EXACT else CandidateMatch.UNVERIFIED
     }
 
     private data class RemoteDuplicateCheck(
@@ -459,10 +451,8 @@ object BackupEngine {
                 System.currentTimeMillis() - indexedAt < REMOTE_INDEX_CACHE_MS
 
         /**
-         * Walks the whole Saved Messages history, newest first. Stops when a
-         * page yields nothing new or the cursor stops moving, and reports
-         * whether that was a genuine end of history — an incomplete walk must
-         * not be treated as an authoritative index.
+         * Walks Saved Messages newest-first, stopping at a page with nothing new;
+         * reports whether the end was genuine (an incomplete walk isn't authoritative).
          */
         private suspend fun scan(
             client: TgClient,
@@ -531,15 +521,8 @@ object BackupEngine {
         if (!dir.isDirectory && !dir.mkdirs()) return null
         if (!dir.isDirectory) return null
         val extension = item.displayName.substringAfterLast('.', "")
-        val suffix = if (extension.isNotEmpty() && extension.length <= 20) ".$extension" else ""
-        val baseLength = (MAX_STAGED_NAME_LENGTH - suffix.length).coerceAtLeast(1)
-        val safeName =
-            (
-                item.displayName
-                    .removeSuffix(suffix)
-                    .replace(UNSAFE_NAME_CHARS, "_")
-                    .take(baseLength) + suffix
-            ).ifEmpty { "media" }
+        val suffix = if (extension.isNotEmpty() && extension.length <= MAX_STAGED_SUFFIX_LENGTH) ".$extension" else ""
+        val safeName = FileTypes.sanitizeName(item.displayName, suffix)
         val staged = File(dir, "${System.currentTimeMillis()}_${seq.incrementAndGet()}_$safeName")
         val digest = MessageDigest.getInstance("SHA-256")
         var complete = false
@@ -550,8 +533,6 @@ object BackupEngine {
             }
             complete = true
             Staged(staged, Hashing.hex(digest.digest()))
-        } catch (e: CancellationException) {
-            throw e
         } catch (_: Exception) {
             null
         } finally {
@@ -579,9 +560,6 @@ object BackupEngine {
         contentHash: String,
     ) = UploadedEntity(
         contentHash = contentHash,
-        fileName = item.displayName,
-        sizeBytes = item.sizeBytes,
         deviceUri = item.uri.toString(),
-        uploadedAt = System.currentTimeMillis(),
     )
 }

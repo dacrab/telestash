@@ -7,23 +7,27 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+/** One message that duplicates another by exact content hash. */
 data class DuplicateItem(
     val messageId: Long,
     val chatId: Long,
     val contentHash: String,
 )
 
+/** Byte-identical messages; [keepMessageId] is the oldest and is kept. */
 data class DuplicateGroup(
     val items: List<DuplicateItem>,
     val keepMessageId: Long,
 )
 
+/** Result of a duplicate scan: everything [GalleryCleanup.clean] could remove. */
 data class GalleryHealth(
     val duplicateGroups: List<DuplicateGroup>,
 ) {
     val removableCount: Int get() = duplicateGroups.sumOf { it.items.size - 1 }
 }
 
+/** Outcome of a cleanup run: messages removed and messages that failed. */
 data class CleanupResult(
     val removed: Int,
     val failed: Int,
@@ -34,20 +38,21 @@ private fun ExactHashCandidate.toDuplicateItem() =
     DuplicateItem(
         messageId = messageId,
         chatId = chatId,
-        contentHash = contentHash.orEmpty(),
+        contentHash = contentHash,
     )
 
+/** Finds exact-content duplicate messages and deletes all but the oldest. */
 class GalleryCleanup(
     private val dao: ItemDao,
     private val client: () -> TgClient?,
     private val accountId: suspend () -> Long,
 ) {
+    /** Groups the local index by content hash and keeps every group with duplicates. */
     suspend fun scan(): GalleryHealth =
         withContext(Dispatchers.IO) {
             val groups =
                 dao
                     .cleanupCandidates()
-                    .filter { !it.contentHash.isNullOrBlank() }
                     .groupBy { it.contentHash }
                     .values
                     .filter { it.size > 1 }
@@ -61,13 +66,14 @@ class GalleryCleanup(
         }
 
     /** Every item in the group except the one we keep. */
-    private fun DuplicateGroup.verifiedExtras(): List<DuplicateItem> = items.filter { it.messageId != keepMessageId }
+    private fun DuplicateGroup.extras(): List<DuplicateItem> = items.filter { it.messageId != keepMessageId }
 
+    /** Deletes every duplicate except the kept one, cloud first, then local rows. */
     suspend fun clean(health: GalleryHealth): CleanupResult =
         withContext(Dispatchers.IO) {
             val doomed =
                 health.duplicateGroups
-                    .flatMap { it.verifiedExtras() }
+                    .flatMap { it.extras() }
                     .distinctBy { it.messageId }
             if (doomed.isEmpty()) return@withContext CleanupResult(0, 0)
 
@@ -87,10 +93,12 @@ class GalleryCleanup(
             var removed = 0
             val errors = mutableListOf<String>()
             doomed.groupBy { it.chatId }.forEach { (chatId, items) ->
-                val ids = items.map { it.messageId }
+                // Cloud first: the reverse order would leave local rows pointing
+                // at messages the user just lost.
                 try {
-                    c.deleteMessages(chatId, ids.toLongArray())
-                    dao.deleteAll(ids)
+                    val ids = items.map { it.messageId }
+                    c.deleteMessages(chatId, ids)
+                    dao.deleteByIds(ids)
                     dao.deleteRemoteMediaByMessageIds(currentAccountId, ids)
                     removed += items.size
                 } catch (e: CancellationException) {

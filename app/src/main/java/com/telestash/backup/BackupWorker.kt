@@ -22,10 +22,9 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 /**
- * Periodically scans MediaStore for new images/videos and uploads them via
- * [BackupEngine]. Runs with no UI, so it bootstraps the TDLib session itself —
- * this is what keeps backups going while the app stays closed. Runs as a
- * foreground service so a long transfer survives Doze and the user can see it.
+ * Periodically scans MediaStore for new media and uploads it via [BackupEngine].
+ * Has no UI, so it bootstraps the TDLib session itself; runs foreground so a
+ * long transfer survives Doze.
  */
 class BackupWorker(
     ctx: Context,
@@ -39,15 +38,36 @@ class BackupWorker(
         private const val AUTH_REPLAY_TIMEOUT_MS = 15_000L
         private const val AUTH_REPLAY_POLL_MS = 250L
 
+        /** Floor for a flood retry whose requested delay we could not read. */
+        private const val MIN_FLOOD_RETRY_SECONDS = 60L
+
         /** Refresh the foreground notification every N uploaded items. */
         private const val PROGRESS_NOTIFY_EVERY = 5
+    }
+
+    /** Why [ensureTdlib] could not hand back an authorized session. */
+    private sealed interface TdlibSession {
+        /** No credentials stored: there is nothing to back up until the user sets them. */
+        object NoCredentials : TdlibSession
+
+        /** Session replay has not landed yet, which is normal right after start(). */
+        object NotAuthorizedYet : TdlibSession
+
+        class Ready(
+            val client: TgClient,
+        ) : TdlibSession
     }
 
     override suspend fun doWork(): Result =
         withContext(Dispatchers.IO) {
             val settings = SettingsRepository(applicationContext)
             if (!settings.autoBackup.first()) return@withContext Result.success()
-            val client = ensureTdlib() ?: return@withContext Result.failure()
+            val client =
+                when (val session = ensureTdlib()) {
+                    TdlibSession.NoCredentials -> return@withContext Result.success()
+                    TdlibSession.NotAuthorizedYet -> return@withContext Result.retry()
+                    is TdlibSession.Ready -> session.client
+                }
 
             BackupEngine.sweepStaleStaged(applicationContext)
             val dao = StashDbHolder.db(applicationContext).itemDao()
@@ -61,7 +81,8 @@ class BackupWorker(
                         scheduleFloodRetry(e.floodWaitSeconds)
                         return@withContext Result.success()
                     }
-                    return@withContext Result.failure()
+                    // "my_id" is briefly unavailable on a cold start.
+                    return@withContext Result.retry()
                 }
             val candidates =
                 BackupEngine.pending(applicationContext, dao, settings.backupFolders.first())
@@ -128,13 +149,14 @@ class BackupWorker(
         }
 
     /** One-shot pass that starts after the server's requested flood-wait. */
-    private suspend fun scheduleFloodRetry(floodWaitSeconds: Long) {
-        if (floodWaitSeconds <= 0) return
+    private suspend fun scheduleFloodRetry(floodWaitSeconds: Long?) {
+        // Never drop the retry: that is how a rate limit turns into a ban.
+        val waitSeconds = floodWaitSeconds?.takeIf { it > 0 } ?: MIN_FLOOD_RETRY_SECONDS
         val settings = SettingsRepository(applicationContext)
         WorkManager.getInstance(applicationContext).enqueueUniqueWork(
             ONE_SHOT,
             ExistingWorkPolicy.REPLACE,
-            oneTimeRequest(settings, floodWaitSeconds),
+            oneTimeRequest(settings, waitSeconds),
         )
     }
 
@@ -147,10 +169,10 @@ class BackupWorker(
             .setConstraints(BackupScheduler.constraints(settings.wifiOnly.first(), settings.chargingOnly.first()))
             .build()
 
-    private suspend fun ensureTdlib(): TgClient? {
+    private suspend fun ensureTdlib(): TdlibSession {
         val settings = SettingsRepository(applicationContext)
         val (apiId, apiHash) = settings.credentialsOnce()
-        if (apiId == 0 || apiHash.isBlank()) return null
+        if (apiId == 0 || apiHash.isBlank()) return TdlibSession.NoCredentials
         // Reuse the running client: creating a second one would build a rival session.
         val client =
             TgClient.peek()?.takeIf { it.isAuthorized } ?: run {
@@ -160,19 +182,14 @@ class BackupWorker(
                 }
             }
         if (!client.isAuthorized) client.refreshAuthorizationState()
-        if (client.isAuthorized) return client
-        return try {
-            // The worker can run right after app death: give the session replay time to land.
-            var waited = 0L
-            while (waited < AUTH_REPLAY_TIMEOUT_MS) {
-                if (client.isAuthorized) return client
-                delay(AUTH_REPLAY_POLL_MS)
-                waited += AUTH_REPLAY_POLL_MS
-            }
-            null
-        } catch (e: TdException) {
-            if (e.isFloodWait) throw e
-            null
+        if (client.isAuthorized) return TdlibSession.Ready(client)
+        // The worker can run right after app death: give the session replay time to land.
+        var waited = 0L
+        while (waited < AUTH_REPLAY_TIMEOUT_MS) {
+            if (client.isAuthorized) return TdlibSession.Ready(client)
+            delay(AUTH_REPLAY_POLL_MS)
+            waited += AUTH_REPLAY_POLL_MS
         }
+        return TdlibSession.NotAuthorizedYet
     }
 }

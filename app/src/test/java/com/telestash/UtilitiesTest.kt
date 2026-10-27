@@ -1,6 +1,7 @@
 package com.telestash
 
 import com.telestash.util.FileTypes
+import com.telestash.util.Format
 import com.telestash.util.Hashing
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -22,6 +23,27 @@ class FileTypesTest {
         assertEquals("image/png", FileTypes.imageMime("photo.PNG"))
         assertEquals("image/heic", FileTypes.imageMime("photo.heic"))
         assertEquals("image/jpeg", FileTypes.imageMime("photo.unknown"))
+    }
+
+    @Test
+    fun sanitizeNameStripsPathsAndKeepsTheSuffix() {
+        assertEquals("IMG_0001.jpg", FileTypes.sanitizeName("DCIM/Camera/IMG_0001.jpg", ".jpg"))
+        // The suffix must survive the unsafe-character pass even if it holds one.
+        assertEquals("my_video.mp4", FileTypes.sanitizeName("my video.mp4", ".mp4"))
+    }
+
+    @Test
+    fun sanitizeNameTruncatesTheBaseButKeepsTheSuffix() {
+        val long = "a".repeat(FileTypes.MAX_NAME_LENGTH * 2) + ".jpg"
+        val safe = FileTypes.sanitizeName(long, ".jpg")
+        assertEquals(FileTypes.MAX_NAME_LENGTH, safe.length)
+        assertTrue(safe.endsWith(".jpg"))
+    }
+
+    @Test
+    fun sanitizeNameFallsBackWhenNothingSurvives() {
+        assertEquals("media", FileTypes.sanitizeName(""))
+        assertEquals("media", FileTypes.sanitizeName("///"))
     }
 }
 
@@ -56,25 +78,32 @@ class HashingTest {
 class FormatSizeTest {
     @Test
     fun sizesScaleToReadableUnits() {
-        assertEquals(
-            "512 B",
-            com.telestash.util.Format
-                .size(512),
-        )
-        assertTrue(
-            com.telestash.util.Format
-                .size(2_048)
-                .endsWith("KB"),
-        )
-        assertTrue(
-            com.telestash.util.Format
-                .size(5 * 1024 * 1024)
-                .endsWith("MB"),
-        )
-        assertTrue(
-            com.telestash.util.Format
-                .size(3L * 1024 * 1024 * 1024)
-                .endsWith("GB"),
-        )
+        assertEquals("512 B", Format.size(512))
+        assertTrue(Format.size(2_048).endsWith("KB"))
+        assertTrue(Format.size(5 * 1024 * 1024).endsWith("MB"))
+        assertTrue(Format.size(3L * 1024 * 1024 * 1024).endsWith("GB"))
+    }
+}
+
+class UploadProgressTest {
+    /** A provider that over-reports must not push the bar past full or the label past 100%. */
+    @Test
+    fun progressClampsOutOfRangeCounters() {
+        val over = UploadProgress(done = 15, total = 10)
+        assertEquals(10, over.safeDone)
+        assertEquals("100%", over.percentLabel)
+        assertEquals(1f, over.fraction)
+
+        val under = UploadProgress(done = -3, total = 10)
+        assertEquals(0, under.safeDone)
+        assertEquals("0%", under.percentLabel)
+    }
+
+    /** Nothing to divide by reads as an empty label, not a crash or "NaN%". */
+    @Test
+    fun emptyTotalDegradesGracefully() {
+        val empty = UploadProgress(done = 0, total = 0)
+        assertEquals("", empty.percentLabel)
+        assertEquals(0f, empty.fraction)
     }
 }

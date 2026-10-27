@@ -5,21 +5,15 @@ import com.telestash.data.SettingsRepository
 import com.telestash.td.TgClient
 
 /**
- * Guards the local database against a Telegram account switch. The gallery, the
- * remote index and the sync watermarks all belong to one account, so a
- * different (or first-seen) user clears them rather than showing one person's
- * photos to another.
- *
- * Shared by the UI session and the background worker, which can both be the
- * first to notice an account change. The upload ledger survives a reset: those
- * files are already in the cloud and must not be uploaded again.
+ * Keeps local data tied to one Telegram account: a different or first-seen user
+ * clears the gallery, remote index and sync watermarks. Shared by the UI and the
+ * background worker; the upload ledger survives so files aren't re-sent.
  */
 object AccountGuard {
     /**
-     * Records [TgClient]'s user as the owner of the local data, clearing data
-     * that belonged to a different or unclaimed account.
+     * Records [TgClient]'s user as owner, clearing data from another/unclaimed account.
      *
-     * @return the account id, and whether a reset happened.
+     * @return the account id and whether a reset happened.
      */
     suspend fun ensureOwnedBy(
         client: TgClient,
@@ -39,10 +33,7 @@ object AccountGuard {
         return userId to reset
     }
 
-    /** True when the database holds data that no account has claimed yet. */
+    /** EXISTS queries only: loading the ledger's columns to test emptiness is not free. */
     private suspend fun hasUnclaimedData(dao: ItemDao): Boolean =
-        dao.hasGalleryItems() ||
-            dao.hasRemoteMedia() ||
-            dao.allContentHashes().isNotEmpty() ||
-            dao.allUploadedHashes().isNotEmpty()
+        dao.hasGalleryItems() || dao.hasRemoteMedia() || dao.hasUploads()
 }
