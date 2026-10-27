@@ -17,11 +17,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
- * Watches MediaStore for newly added media. Camera shots land in MediaStore
- * only after the write finishes, so a debounced observer sees complete files.
- * Trashed items never trigger it (they don't pass [DeviceMedia] visibility
- * filtering). The pending list is handed to [onNewMedia] so the upload path
- * doesn't have to re-scan MediaStore.
+ * Debounced MediaStore observer for newly added media; hands the pending list
+ * to [onNewMedia] so the upload path doesn't re-scan MediaStore.
  */
 class NewMediaWatcher(
     private val context: Context,
@@ -55,6 +52,7 @@ class NewMediaWatcher(
         launchScan()
     }
 
+    /** Stops observing; safe to call when not running. */
     fun stop() {
         val current = observer
         observer = null

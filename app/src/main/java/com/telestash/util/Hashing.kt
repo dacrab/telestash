@@ -25,8 +25,10 @@ object Hashing {
         return String(out)
     }
 
+    /** SHA-256 hex digest of a file. */
     fun sha256(file: File): String = file.inputStream().use { sha256(it) }
 
+    /** SHA-256 hex digest of a stream. */
     fun sha256(input: InputStream): String {
         val digest = MessageDigest.getInstance("SHA-256")
         copy(input, null, digest)

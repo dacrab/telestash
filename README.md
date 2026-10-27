@@ -40,7 +40,8 @@ Requirements: JDK 17+, Android SDK 37.
 ./gradlew assembleDebug
 ```
 
-The APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
+The APKs are written to `app/build/outputs/apk/debug/` — one per ABI plus a
+universal build (`app-arm64-v8a-debug.apk` is what most phones need).
 
 Or open the project in Android Studio and press Run.
 

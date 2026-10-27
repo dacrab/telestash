@@ -31,6 +31,7 @@ import com.telestash.data.AlbumEntity
 
 private const val MAX_ALBUM_NAME = 64
 
+/** Prompts for a new album name, rejecting blanks and duplicates. */
 @Composable
 fun NewAlbumDialog(
     vm: AppViewModel,
@@ -79,6 +80,7 @@ fun NewAlbumDialog(
     )
 }
 
+/** Moves the current selection into an existing album or a newly named one. */
 @Composable
 fun AddToAlbumDialog(
     vm: AppViewModel,

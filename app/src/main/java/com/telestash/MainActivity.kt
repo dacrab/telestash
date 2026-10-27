@@ -10,6 +10,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.ui.TeleStashApp
 import com.telestash.ui.theme.TeleStashTheme
 
+/** Single-activity host: applies the theme and wires the view model into Compose. */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

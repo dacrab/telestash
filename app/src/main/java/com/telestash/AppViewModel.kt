@@ -90,6 +90,10 @@ data class GalleryUi(
     val hasMore: Boolean = true,
 )
 
+/**
+ * UI-facing entry point: owns the TDLib session, settings and paging, and
+ * delegates gallery actions to the sync, selection and cleanup coordinators.
+ */
 class AppViewModel(
     private val app: Application,
 ) : AndroidViewModel(app) {
@@ -196,7 +200,7 @@ class AppViewModel(
     /** Re-pull the newest page and fold any new remote media into Room. */
     fun refresh() {
         if (client == null || _gallery.value.syncing) return
-        viewModelScope.launch(Dispatchers.IO) { gallerySync.syncAll() }
+        gallerySync.syncAll()
     }
 
     fun setMediaFilter(filter: Int) {
@@ -366,7 +370,7 @@ class AppViewModel(
                 if (!wasReady) prepareAccount(c)
                 _auth.value = AuthUi.Ready
                 if (!wasReady) {
-                    viewModelScope.launch(Dispatchers.IO) { gallerySync.syncAll() }
+                    gallerySync.syncAll()
                     newMediaWatcher.start()
                 }
             }
@@ -448,18 +452,15 @@ class AppViewModel(
 
     private fun userError(e: Throwable): String {
         val msg = e.message ?: "unknown error"
-        return if (e is TdException && e.isFloodWait) {
-            val secs = e.floodWaitSeconds
-            val wait =
-                if (secs >= SECONDS_PER_MINUTE) {
-                    "${secs / SECONDS_PER_MINUTE} min ${secs % SECONDS_PER_MINUTE}s"
-                } else {
-                    "${secs}s"
-                }
-            "Too many attempts. Telegram asks to wait $wait before retrying."
-        } else {
-            "Error: $msg"
-        }
+        if (e !is TdException || !e.isFloodWait) return "Error: $msg"
+        val secs = e.floodWaitSeconds ?: return "Too many attempts. Telegram asked us to slow down; try again shortly."
+        val wait =
+            if (secs >= SECONDS_PER_MINUTE) {
+                "${secs / SECONDS_PER_MINUTE} min ${secs % SECONDS_PER_MINUTE}s"
+            } else {
+                "${secs}s"
+            }
+        return "Too many attempts. Telegram asks to wait $wait before retrying."
     }
 
     fun loadMore() = gallerySync.loadMore()

@@ -1,6 +1,7 @@
 package com.telestash.td
 
 import android.content.Context
+import android.util.Log
 import com.telestash.BuildConfig
 import com.telestash.data.DbKeyStore
 import kotlinx.coroutines.CancellationException
@@ -10,6 +11,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -24,20 +26,47 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
+/** A failed request. [code] is Telegram's error code, or a reserved [LOCAL_*] value. */
 class TdException(
+    val code: Int,
     override val message: String,
 ) : Exception(message) {
-    val isFloodWait: Boolean get() = message.startsWith("FLOOD_WAIT_")
-    val floodWaitSeconds: Long
-        get() =
-            if (isFloodWait) {
-                message.removePrefix("FLOOD_WAIT_").substringBefore(' ').toLongOrNull() ?: 0L
-            } else {
-                0L
-            }
+    /** 429 is FLOOD_WAIT_N, 420 is FLOOD_PREMIUM_WAIT_N. */
+    val isFloodWait: Boolean get() = code == CODE_FLOOD_WAIT || code == CODE_FLOOD_PREMIUM_WAIT
+
+    /** TDLib's error for a request superseded by a newer one. */
+    val isRequestAborted: Boolean get() = message.contains(REQUEST_ABORTED, ignoreCase = true)
+
+    /** Null when the delay could not be read, which is not the same as zero. */
+    val floodWaitSeconds: Long?
+        get() {
+            if (!isFloodWait) return null
+            return FLOOD_WAIT_SECONDS
+                .find(message)
+                ?.groupValues
+                ?.get(1)
+                ?.toLongOrNull()
+        }
+
+    companion object {
+        const val CODE_FLOOD_WAIT = 429
+        const val CODE_FLOOD_PREMIUM_WAIT = 420
+
+        /** Not a server error: this app stopped waiting for a response. */
+        const val LOCAL_TIMED_OUT = -1
+
+        /** Not a server error: TDLib had not yet loaded what the request needs. */
+        const val LOCAL_UNAVAILABLE = -2
+
+        /** Covers `FLOOD_WAIT_42`, `FLOOD_PREMIUM_WAIT_42` and `retry after 42`. */
+        private val FLOOD_WAIT_SECONDS = Regex("""(?:FLOOD_PREMIUM_WAIT|FLOOD_WAIT|retry after )_?(\d+)""")
+
+        private const val REQUEST_ABORTED = "request aborted"
+    }
 }
 
 /**
@@ -58,6 +87,7 @@ class TgClient private constructor(
         private const val DOWNLOAD_PRIORITY = 16
         private const val LOG_MAX_SIZE_BYTES = 1L shl 22
         private const val UPDATE_REPLAY_BUFFER = 32
+        private const val TAG = "TgClient"
 
         /**
          * Uploads of large files take minutes; give the server enough time to
@@ -65,6 +95,7 @@ class TgClient private constructor(
          */
         private const val SEND_CONFIRM_TIMEOUT_MS = 30L * 60 * 1000
         private const val FORWARD_MESSAGE_LIMIT = 100
+        private const val DELETE_BATCH_SIZE = 500
         private const val CLOSE_TIMEOUT_MS = 5_000L
         private const val HISTORY_RETRY_LIMIT = 3
         private const val HISTORY_RETRY_BASE_DELAY_MS = 500L
@@ -87,12 +118,26 @@ class TgClient private constructor(
 
         fun peek(): TgClient? = instance
 
+        /** Closes the session and drops [instance]; callers must not reuse what they held. */
         suspend fun shutdownAndWait() {
-            val c = instance ?: return
+            val c = synchronized(this) { instance } ?: return
             try {
-                runCatching { c.native.send(TdApi.Close(), null, null) }
-                withTimeoutOrNull(CLOSE_TIMEOUT_MS) { c.authorizationClosed.await() }
+                // A null result handler would make Client.send discard the answer.
+                val closed = CompletableDeferred<TdApi.Object>()
+                c.native.send(
+                    TdApi.Close(),
+                    { result -> closed.complete(result) },
+                    { closed.completeExceptionally(it) },
+                )
+                val result = runCatching { closed.await() }.getOrNull()
+                if (result is TdApi.Error) Log.w(TAG, "TDLib rejected Close: ${result.message}")
+                val confirmed = withTimeoutOrNull(CLOSE_TIMEOUT_MS) { c.authorizationClosed.await() } != null
+                if (!confirmed) {
+                    // TDLib may still be flushing onto the database dir.
+                    Log.w(TAG, "TDLib did not confirm close within ${CLOSE_TIMEOUT_MS}ms")
+                }
             } finally {
+                c.isAuthorized = false
                 c.scope.cancel()
                 synchronized(this) {
                     if (instance === c) instance = null
@@ -121,7 +166,9 @@ class TgClient private constructor(
     /** Guards [start] against the UI and the backup worker racing on cold start. */
     private val startAttempted = AtomicBoolean(false)
 
-    private var cachedChatId = 0L
+    // CreatePrivateChat is idempotent for your own id, so a race here only
+    // costs a redundant round trip.
+    @Volatile private var cachedChatId = 0L
     private val sendMutex = Mutex()
 
     internal val native: Client =
@@ -129,8 +176,8 @@ class TgClient private constructor(
             // tryEmit, not scope.launch { emit }: a progress flood would otherwise
             // spawn one coroutine per update and race concurrent sends into the flow.
             { update -> if (update is TdApi.Update) _updates.tryEmit(update) },
-            { /* update handler exception */ },
-            { /* default exception */ },
+            { e -> Log.e(TAG, "TDLib update handler failed", e) },
+            { e -> Log.e(TAG, "TDLib request handler failed", e) },
         )
 
     init {
@@ -147,7 +194,6 @@ class TgClient private constructor(
                 }
         }
         runCatching { Client.execute(TdApi.SetLogVerbosityLevel(1)) }
-        runCatching { Client.execute(TdApi.SetOption("redact_phone_numbers", TdApi.OptionValueBoolean(true))) }
         runCatching {
             val logDir = File("$tdlibDir-logs").apply { mkdirs() }
             Client.execute(
@@ -163,47 +209,39 @@ class TgClient private constructor(
     }
 
     /**
-     * Configure TDLib; safe to call once per client instance (guarded, so the
-     * UI and the backup worker can both call it on a cold start). Sending
-     * SetTdlibParameters is what triggers the session replay from the local
-     * database; authorization then arrives asynchronously as
-     * [TdApi.AuthorizationStateReady] and flips [isAuthorized].
+     * Configures TDLib; guarded so the UI and worker can both call it on a cold
+     * start. SetTdlibParameters triggers the async session replay from the local
+     * database, and authorization then flips [isAuthorized].
      */
     suspend fun start() {
         if (!startAttempted.compareAndSet(false, true)) return
         try {
             send(tdlibParameters())
-        } catch (e: CancellationException) {
-            startAttempted.set(false)
-            throw e
         } catch (e: Exception) {
+            // Let a later start() retry rather than latching the failure.
             startAttempted.set(false)
             throw e
         }
     }
 
-    private fun tdlibParameters(): TdApi.SetTdlibParameters {
-        val useFileDatabase = true
-        val useChatInfoDatabase = true
-        val useMessageDatabase = true
-        val useSecretChats = false
-        return TdApi.SetTdlibParameters(
-            false,
+    @Suppress("LongParameterList")
+    private fun tdlibParameters(): TdApi.SetTdlibParameters =
+        TdApi.SetTdlibParameters(
+            false, // useTestDc
             tdlibDir,
             "$tdlibDir/files",
             dbKey,
-            useFileDatabase,
-            useChatInfoDatabase,
-            useMessageDatabase,
-            useSecretChats,
+            true, // useFileDatabase
+            true, // useChatInfoDatabase
+            true, // useMessageDatabase
+            false, // useSecretChats: removed in TDLib 1.8, must stay false
             apiId,
             apiHash,
-            "en",
+            "en", // systemLanguageCode
             android.os.Build.MODEL,
             android.os.Build.VERSION.RELEASE,
             BuildConfig.APP_VERSION,
         )
-    }
 
     suspend fun setPhone(phone: String) {
         send(
@@ -242,8 +280,9 @@ class TgClient private constructor(
 
     suspend fun currentUserId(): Long =
         (send(TdApi.GetOption("my_id")) as? TdApi.OptionValueInteger)?.value
-            ?: throw TdException("my_id option is unavailable")
+            ?: throw TdException(TdException.LOCAL_UNAVAILABLE, "my_id option is unavailable")
 
+    /** Id of your own Saved Messages chat, resolved (and cached) on first use. */
     suspend fun savedMessagesChatId(): Long {
         if (cachedChatId != 0L) return cachedChatId
         cachedChatId = send(TdApi.CreatePrivateChat(currentUserId(), true)).id
@@ -286,31 +325,46 @@ class TgClient private constructor(
      * update stream to go quiet for [TOPICS_QUIET_PERIOD_MS].
      */
     suspend fun loadTopics(): List<TdApi.SavedMessagesTopic> {
-        val collected = mutableListOf<TdApi.SavedMessagesTopic>()
-        val lastArrival = AtomicLong(System.currentTimeMillis())
+        // Keyed by id: the map is also the dedupe, and puts are thread-safe.
+        val collected = ConcurrentHashMap<Long, TdApi.SavedMessagesTopic>()
+        val lastArrival = AtomicLong(0L)
         val collector =
             scope.launch {
                 updates
                     .filterIsInstance<TdApi.UpdateSavedMessagesTopic>()
                     .collect {
-                        collected.add(it.topic)
+                        collected[it.topic.id] = it.topic
                         // Each arrival restarts the quiet-period clock below.
                         lastArrival.set(System.currentTimeMillis())
                     }
             }
         try {
-            runCatching { send(TdApi.LoadSavedMessagesTopics(TOPICS_PAGE_LIMIT)) }
+            try {
+                send(TdApi.LoadSavedMessagesTopics(TOPICS_PAGE_LIMIT))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // A failed request just means no topics arrive.
+            }
+            // Start the clock only once the request is out, or the round trip
+            // eats the quiet period and the loop below never runs.
+            lastArrival.set(System.currentTimeMillis())
             withTimeoutOrNull(TOPICS_COLLECTION_TIMEOUT_MS) {
                 while (System.currentTimeMillis() - lastArrival.get() < TOPICS_QUIET_PERIOD_MS) {
                     delay(TOPICS_QUIET_PERIOD_MS)
                 }
             }
         } finally {
-            collector.cancel()
+            // Joining, not cancel: it publishes the collector's writes to us.
+            collector.cancelAndJoin()
         }
-        return collected.distinctBy { it.id }
+        return collected.values.toList()
     }
 
+    /**
+     * Sends a local file to Saved Messages as a document, returning only once
+     * the server confirms it. [fileName] is carried in the caption.
+     */
     suspend fun uploadDocument(
         path: String,
         fileName: String,
@@ -372,7 +426,7 @@ class TgClient private constructor(
             val outcome =
                 withTimeoutOrNull(SEND_CONFIRM_TIMEOUT_MS) {
                     buffered.remove(messageId) ?: receiveOutcome(messageId)
-                } ?: throw TdException("SEND_TIMEOUT")
+                } ?: throw TdException(TdException.LOCAL_TIMED_OUT, "Telegram did not confirm the upload")
             return confirmedMessage(outcome)
         }
 
@@ -383,11 +437,12 @@ class TgClient private constructor(
                     when (update) {
                         is TdApi.UpdateMessageSendSucceeded -> update.message
                         is TdApi.UpdateMessageSendFailed ->
-                            throw TdException(update.error.message)
+                            throw TdException(update.error.code, update.error.message)
                         else -> error("unreachable")
                     }
                 }
-                is SendEvent.Deleted -> throw TdException("send was deleted before completion")
+                is SendEvent.Deleted ->
+                    throw TdException(TdException.LOCAL_UNAVAILABLE, "send was deleted before completion")
             }
 
         private suspend fun receiveOutcome(messageId: Long): SendEvent {
@@ -429,6 +484,10 @@ class TgClient private constructor(
         }
     }
 
+    /**
+     * Moves messages into an album topic by forwarding them there and deleting
+     * the originals; returns the forwarded messages (in their new ids).
+     */
     suspend fun moveToTopic(
         messageIds: LongArray,
         topicId: Long,
@@ -455,7 +514,10 @@ class TgClient private constructor(
                             )
                         val messages = response.messages.filterNotNull()
                         if (messages.size != chunk.size) {
-                            throw TdException("forward returned ${messages.size} of ${chunk.size} message(s)")
+                            throw TdException(
+                                TdException.LOCAL_UNAVAILABLE,
+                                "forward returned ${messages.size} of ${chunk.size} message(s)",
+                            )
                         }
                         messages.map { collector.await(it.id) }
                     }
@@ -491,19 +553,20 @@ class TgClient private constructor(
             try {
                 return block()
             } catch (e: TdException) {
-                val aborted = e.message.orEmpty().contains("request aborted", ignoreCase = true)
-                if (!aborted || attempt >= HISTORY_RETRY_LIMIT) throw e
+                if (!e.isRequestAborted || attempt >= HISTORY_RETRY_LIMIT) throw e
                 attempt++
                 delay(HISTORY_RETRY_BASE_DELAY_MS * attempt)
             }
         }
     }
 
+    /** Resolves a remote file id into a file, used to match cloud copies of an upload. */
     suspend fun resolveRemoteFile(
         remoteFileId: String,
         type: TdApi.FileType,
     ): TdApi.File = send(TdApi.GetRemoteFile(remoteFileId, type))
 
+    /** True when the message is still on the server; a flood wait still propagates. */
     suspend fun messageExists(
         chatId: Long,
         messageId: Long,
@@ -522,24 +585,28 @@ class TgClient private constructor(
     suspend fun download(fileId: Int): String {
         val local = send(TdApi.DownloadFile(fileId, DOWNLOAD_PRIORITY, 0, 0, true)).local
         if (!local.isDownloadingCompleted || local.path.isBlank() || !File(local.path).exists()) {
-            throw TdException("download did not complete")
+            throw TdException(TdException.LOCAL_UNAVAILABLE, "download did not complete")
         }
         return local.path
     }
 
+    /** Deletes messages in bounded batches; TDLib rejects an oversized request outright. */
     suspend fun deleteMessages(
         chatId: Long,
-        messageIds: LongArray,
+        messageIds: List<Long>,
     ) {
-        send(TdApi.DeleteMessages(chatId, messageIds, true))
+        messageIds.chunked(DELETE_BATCH_SIZE).forEach { batch ->
+            send(TdApi.DeleteMessages(chatId, batch.toLongArray(), true))
+        }
     }
 
+    /** Sends a TDLib function and awaits its result, mapping errors to [TdException]. */
     @Suppress("UNCHECKED_CAST")
     suspend fun <T : TdApi.Object> send(function: TdApi.Function<T>): T {
         val d = CompletableDeferred<TdApi.Object>()
         native.send(function) { result ->
             if (result is TdApi.Error) {
-                d.completeExceptionally(TdException(result.message))
+                d.completeExceptionally(TdException(result.code, result.message))
             } else {
                 d.complete(result)
             }

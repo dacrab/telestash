@@ -1,8 +1,8 @@
 {
   "formatVersion": 1,
   "database": {
-    "version": 8,
-    "identityHash": "fc376cb085e088ef167afd3bc6a70e6f",
+    "version": 9,
+    "identityHash": "3aed4850bfaa514386a91cc296d6fda2",
     "entities": [
       {
         "tableName": "items",
@@ -165,7 +165,7 @@
       },
       {
         "tableName": "uploads",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`contentHash` TEXT NOT NULL, `fileName` TEXT NOT NULL, `sizeBytes` INTEGER NOT NULL, `deviceUri` TEXT, `uploadedAt` INTEGER NOT NULL, PRIMARY KEY(`contentHash`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`contentHash` TEXT NOT NULL, `deviceUri` TEXT, PRIMARY KEY(`contentHash`))",
         "fields": [
           {
             "fieldPath": "contentHash",
@@ -174,27 +174,9 @@
             "notNull": true
           },
           {
-            "fieldPath": "fileName",
-            "columnName": "fileName",
-            "affinity": "TEXT",
-            "notNull": true
-          },
-          {
-            "fieldPath": "sizeBytes",
-            "columnName": "sizeBytes",
-            "affinity": "INTEGER",
-            "notNull": true
-          },
-          {
             "fieldPath": "deviceUri",
             "columnName": "deviceUri",
             "affinity": "TEXT"
-          },
-          {
-            "fieldPath": "uploadedAt",
-            "columnName": "uploadedAt",
-            "affinity": "INTEGER",
-            "notNull": true
           }
         ],
         "primaryKey": {
@@ -328,7 +310,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'fc376cb085e088ef167afd3bc6a70e6f')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '3aed4850bfaa514386a91cc296d6fda2')"
     ]
   }
 }

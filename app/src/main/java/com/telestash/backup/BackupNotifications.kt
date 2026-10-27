@@ -11,6 +11,7 @@ object BackupNotifications {
     const val CHANNEL_ID = "telestash-backup"
     const val NOTIFICATION_ID = 1
 
+    /** Creates the low-importance backup channel; safe to call repeatedly. */
     fun ensureChannel(context: Context) {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(
@@ -20,6 +21,7 @@ object BackupNotifications {
         )
     }
 
+    /** Builds the ongoing "N of M" progress notification (indeterminate when total is unknown). */
     fun progress(
         context: Context,
         done: Int,

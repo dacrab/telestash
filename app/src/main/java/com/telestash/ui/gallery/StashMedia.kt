@@ -286,7 +286,7 @@ fun VideoPlayer(
         DisposableEffect(exo) { onDispose { exo.release() } }
         AndroidView(
             factory = { ctx ->
-                androidx.media3.ui.PlayerView(ctx).apply {
+                PlayerView(ctx).apply {
                     player = exo
                     layoutParams =
                         ViewGroup.LayoutParams(
@@ -295,7 +295,7 @@ fun VideoPlayer(
                         )
                     useController = true
                     // FIT shows portrait video correctly instead of forcing 16:9.
-                    resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 }
             },
             modifier = Modifier.fillMaxSize(),

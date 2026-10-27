@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import org.drinkless.tdlib.TdApi
 import java.io.File
 
+/** Multi-select actions — download, delete, move to album — each on IO. */
 internal class SelectionCoordinator(
     private val scope: CoroutineScope,
     private val gallery: MutableStateFlow<GalleryUi>,
@@ -47,7 +48,7 @@ internal class SelectionCoordinator(
                 val topicId = newAlbumName?.let { c.createAlbumTopic(it) } ?: albumTopicId
                 val moved = c.moveToTopic(selected.toLongArray(), topicId)
                 val accountId = c.currentUserId()
-                dao.deleteAll(selected.toList())
+                dao.deleteByIds(selected.toList())
                 dao.deleteRemoteMediaByMessageIds(accountId, selected.toList())
                 indexRemote(moved, topicId)
                 upsertRemote(moved.mapNotNull { messageToEntity(it, topicId = topicId) })
@@ -139,7 +140,7 @@ internal class SelectionCoordinator(
             deleteRemote(c, items)
             val ids = items.map { it.messageId }
             val accountId = c.currentUserId()
-            dao.deleteAll(ids)
+            dao.deleteByIds(ids)
             dao.deleteRemoteMediaByMessageIds(accountId, ids)
             toast(if (items.size == 1) "Deleted" else "Deleted ${items.size} items")
             exitSelectionMode()
@@ -155,7 +156,7 @@ internal class SelectionCoordinator(
         items: List<StashItem>,
     ) {
         items.groupBy { it.chatId }.forEach { (chatId, group) ->
-            c.deleteMessages(chatId, group.map { it.messageId }.toLongArray())
+            c.deleteMessages(chatId, group.map { it.messageId })
         }
     }
 }

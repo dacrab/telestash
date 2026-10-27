@@ -104,7 +104,7 @@ android {
     }
 
     // TDLib's native library is ~23 MB per ABI, so a single universal APK is
-    // ~95 MB and installs all four. Per-ABI APKs cut the download to ~25 MB;
+    // ~95 MB and bundles every ABI. Per-ABI APKs cut the download to ~25 MB;
     // the universal APK stays as the fallback for anything the split misses.
     splits {
         abi {

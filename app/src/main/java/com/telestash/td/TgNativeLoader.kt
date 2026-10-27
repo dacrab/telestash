@@ -1,6 +1,5 @@
 package com.telestash.td
 
-import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 
 /**
@@ -11,11 +10,12 @@ import org.drinkless.tdlib.TdApi
 object TgNativeLoader {
     private var loaded = false
 
+    /** Loads TdApi (and thus the native library) once, on the calling thread. */
     @Synchronized
     fun preload() {
         if (loaded) return
-        // Any client call runs the static init; verbosity 0 keeps TDLib quiet.
-        runCatching { Client.execute(TdApi.SetLogVerbosityLevel(0)) }
+        // Touching TdApi runs its static initializer, which loads tdjni.
+        TdApi::class.java
         loaded = true
     }
 }
