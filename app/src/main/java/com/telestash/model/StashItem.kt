@@ -1,5 +1,6 @@
 package com.telestash.model
 
+import androidx.compose.runtime.Immutable
 import com.telestash.util.FileTypes
 import org.drinkless.tdlib.TdApi
 
@@ -16,7 +17,12 @@ internal class ParsedMessage(
     val remoteType: String,
 )
 
-/** A media item shown in the gallery, extracted from a Saved Messages message. */
+/**
+ * A media item shown in the gallery, extracted from a Saved Messages message.
+ * [Immutable] so grid cells stay skippable; [miniJpeg] is never mutated after
+ * it is parsed out of TDLib.
+ */
+@Immutable
 data class StashItem(
     val messageId: Long,
     val chatId: Long,

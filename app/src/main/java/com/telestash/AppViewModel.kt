@@ -2,6 +2,7 @@ package com.telestash
 
 import android.app.Application
 import android.net.Uri
+import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.paging.Pager
@@ -69,6 +70,11 @@ sealed interface AuthUi {
     data object Ready : AuthUi
 }
 
+/**
+ * Everything the gallery screen renders; one flow keeps the UI consistent.
+ * [Immutable] so the shell only recomposes for the fields a reader touches.
+ */
+@Immutable
 data class GalleryUi(
     val albums: List<AlbumEntity> = emptyList(),
     val loadingMore: Boolean = false,
