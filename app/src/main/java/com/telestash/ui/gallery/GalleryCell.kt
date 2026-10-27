@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -38,14 +39,17 @@ fun GalleryCell(
     onClick: () -> Unit = {},
     onLongClick: () -> Unit = {},
 ) {
+    // Built once per cell state instead of on every recomposition (date formatting allocates).
     val description =
-        buildString {
-            append(if (item.isVideo) "Video" else "Photo")
-            append(", ")
-            append(Format.date(item.date))
-            append(", ")
-            append(item.fileName)
-            if (selected) append(", selected")
+        remember(item, selected) {
+            buildString {
+                append(if (item.isVideo) "Video" else "Photo")
+                append(", ")
+                append(Format.date(item.date))
+                append(", ")
+                append(item.fileName)
+                if (selected) append(", selected")
+            }
         }
     Box(
         Modifier

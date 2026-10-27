@@ -32,7 +32,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.telestash.data.AlbumEntity
+import com.telestash.ui.itemCount
 
+/** The Albums tab: a card per topic with its photo count, or an empty-state hint. */
 @Composable
 fun AlbumsScreen(
     albums: List<AlbumEntity>,
@@ -111,11 +113,7 @@ private fun AlbumCard(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                when (count) {
-                    null -> "Counting…"
-                    1 -> "1 item"
-                    else -> "$count items"
-                },
+                count?.let(::itemCount) ?: "Counting…",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

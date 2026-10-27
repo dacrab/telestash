@@ -35,6 +35,7 @@ class GalleryPermissions internal constructor(
     fun openAppSettings() = onOpenAppSettings()
 }
 
+/** Remembers the current permission state and the launchers that refresh it. */
 @Composable
 fun rememberGalleryPermissions(): GalleryPermissions {
     val context = LocalContext.current

@@ -6,23 +6,28 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.util.Log
 import com.telestash.data.ItemDao
 import com.telestash.data.UploadedEntity
 import com.telestash.device.DeviceMedia
 import com.telestash.util.FileTypes
 import com.telestash.util.Hashing
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
 
+/** Writes downloaded media into the device gallery via MediaStore. */
 internal class MediaStoreSaver(
     context: Context,
     private val dao: ItemDao,
 ) {
     private val app = context.applicationContext
 
+    /**
+     * Copies a downloaded file into the gallery and records its hash, so the
+     * exact bytes are never uploaded back to Telegram.
+     */
     suspend fun save(
         source: File,
         displayName: String,
@@ -45,25 +50,14 @@ internal class MediaStoreSaver(
             val contentHash = copyAndHash(resolver, uri, source)
             publishIfNeeded(resolver, uri, usesPending)
             published = true
-            try {
-                dao.upsertUploaded(
-                    listOf(
-                        UploadedEntity(
-                            contentHash = contentHash,
-                            fileName = displayName,
-                            sizeBytes = source.length(),
-                            deviceUri = uri.toString(),
-                            uploadedAt = System.currentTimeMillis(),
-                        ),
+            dao.upsertUploaded(
+                listOf(
+                    UploadedEntity(
+                        contentHash = contentHash,
+                        deviceUri = uri.toString(),
                     ),
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-            }
-        } catch (e: CancellationException) {
-            if (!published) deletePartial(resolver, uri)
-            throw e
+                ),
+            )
         } catch (e: Exception) {
             if (!published) deletePartial(resolver, uri)
             throw e
@@ -76,13 +70,16 @@ internal class MediaStoreSaver(
         usesPending: Boolean,
     ): ContentValues =
         ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+            put(MediaStore.MediaColumns.DISPLAY_NAME, sanitize(displayName))
             put(
                 MediaStore.MediaColumns.MIME_TYPE,
                 if (isVideo) FileTypes.videoMime(displayName) else FileTypes.imageMime(displayName),
             )
             if (usesPending) put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
+
+    /** Telegram names can hold a path separator; MediaStore rejects those. */
+    private fun sanitize(displayName: String): String = FileTypes.sanitizeName(displayName)
 
     private fun copyAndHash(
         resolver: ContentResolver,
@@ -115,6 +112,8 @@ internal class MediaStoreSaver(
         resolver: ContentResolver,
         uri: Uri,
     ) {
+        // On the error path, so never let cleanup replace the original error.
         runCatching { resolver.delete(uri, null, null) }
+            .onFailure { Log.w("MediaStoreSaver", "Could not remove partial entry $uri", it) }
     }
 }

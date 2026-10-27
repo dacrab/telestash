@@ -4,6 +4,7 @@ import com.telestash.data.ItemEntity
 import com.telestash.data.RemoteMediaEntity
 import org.drinkless.tdlib.TdApi
 
+/** Maps a cached row back to the UI/domain model. */
 fun ItemEntity.toStashItem() =
     StashItem(
         messageId = messageId,
@@ -41,6 +42,7 @@ fun StashItem.toEntity(
     miniJpeg = miniJpeg,
 )
 
+/** Parses a message and caches it, or null when it isn't gallery media. */
 fun messageToEntity(
     message: TdApi.Message,
     topicId: Long = 0L,

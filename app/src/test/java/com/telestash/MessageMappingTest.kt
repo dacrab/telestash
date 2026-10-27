@@ -14,10 +14,29 @@ import org.junit.Test
 class TdExceptionTest {
     @Test
     fun floodWaitIsParsedWithoutLosingNonFloodErrors() {
-        val flood = TdException("FLOOD_WAIT_42 try later")
+        val flood = TdException(429, "FLOOD_WAIT_42 try later")
         assertTrue(flood.isFloodWait)
         assertEquals(42L, flood.floodWaitSeconds)
-        assertFalse(TdException("network unavailable").isFloodWait)
+        assertFalse(TdException(400, "network unavailable").isFloodWait)
+    }
+
+    @Test
+    fun premiumFloodWaitIsRecognizedAndParsed() {
+        val premium = TdException(420, "FLOOD_PREMIUM_WAIT_120")
+        assertTrue(premium.isFloodWait)
+        assertEquals(120L, premium.floodWaitSeconds)
+    }
+
+    @Test
+    fun retryAfterMessageParsesAsFloodWait() {
+        val retried = TdException(429, "retry after 30")
+        assertTrue(retried.isFloodWait)
+        assertEquals(30L, retried.floodWaitSeconds)
+    }
+
+    @Test
+    fun unreadableFloodDelayIsNullNotZero() {
+        assertEquals(null, TdException(429, "FLOOD_WAIT").floodWaitSeconds)
     }
 }
 

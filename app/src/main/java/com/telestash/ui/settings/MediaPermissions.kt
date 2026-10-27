@@ -1,6 +1,5 @@
 package com.telestash.ui.settings
 
-import android.Manifest.permission.POST_NOTIFICATIONS
 import android.Manifest.permission.READ_EXTERNAL_STORAGE
 import android.Manifest.permission.READ_MEDIA_IMAGES
 import android.Manifest.permission.READ_MEDIA_VIDEO
@@ -41,9 +40,6 @@ object MediaPermissions {
     private fun hasSelectedMediaAccess(context: Context): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
             granted(context, READ_MEDIA_VISUAL_USER_SELECTED)
-
-    fun hasNotificationAccess(context: Context): Boolean =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || granted(context, POST_NOTIFICATIONS)
 
     /** True on Android 13+, where backup progress needs a user-granted permission. */
     fun needsNotificationPermission(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU

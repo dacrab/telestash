@@ -1,5 +1,6 @@
 package com.telestash.ui.settings
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -24,6 +25,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -53,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.AppViewModel
 import com.telestash.GalleryHealth
+import com.telestash.UploadProgress
 import com.telestash.backup.BackupGate
 import com.telestash.device.DeviceFolder
 import com.telestash.device.DeviceMedia
@@ -120,9 +123,7 @@ fun SettingsScreen(
                     .fillMaxHeight()
                     .widthIn(max = 640.dp)
                     .fillMaxWidth(),
-            verticalArrangement =
-                androidx.compose.foundation.layout.Arrangement
-                    .spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item {
                 BackupStatusCard(
@@ -334,7 +335,7 @@ private fun BackupStatusCard(
     autoBackup: Boolean,
     hasMediaPermission: Boolean,
     hasPartialMediaPermission: Boolean,
-    uploadProgress: com.telestash.UploadProgress?,
+    uploadProgress: UploadProgress?,
     pendingCount: Int,
     waitReason: String?,
     onBackupNow: () -> Unit,
@@ -342,10 +343,8 @@ private fun BackupStatusCard(
     val (title, subtitle, color) =
         when {
             uploadProgress != null -> {
-                val total = uploadProgress.total.coerceAtLeast(0)
-                val done = uploadProgress.done.coerceIn(0, total)
                 Triple(
-                    "Uploading $done of $total",
+                    "Uploading ${uploadProgress.safeDone} of ${uploadProgress.safeTotal}",
                     "Uploading to your Telegram…",
                     MaterialTheme.colorScheme.primary,
                 )
@@ -391,7 +390,7 @@ private fun BackupStatusCard(
     val actionLabel = if (waitReason != null) "Back up anyway" else "Back up now"
     Card(
         colors =
-            androidx.compose.material3.CardDefaults.cardColors(
+            CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
             ),
         modifier =

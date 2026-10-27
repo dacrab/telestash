@@ -33,6 +33,6 @@ class MigrationChainTest {
 
     private companion object {
         /** Keep in sync with @Database(version = ...) in StashDb. */
-        const val CURRENT_VERSION = 8
+        const val CURRENT_VERSION = 9
     }
 }

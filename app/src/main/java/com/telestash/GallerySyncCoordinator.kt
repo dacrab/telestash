@@ -1,5 +1,6 @@
 package com.telestash
 
+import android.util.Log
 import com.telestash.data.AlbumEntity
 import com.telestash.data.ItemDao
 import com.telestash.data.ItemEntity
@@ -8,16 +9,17 @@ import com.telestash.model.messageToEntity
 import com.telestash.model.messageToRemoteMedia
 import com.telestash.td.TdException
 import com.telestash.td.TgClient
+import com.telestash.util.JobTracker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeout
 import org.drinkless.tdlib.TdApi
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Owns the Saved Messages -> Room sync and the paging cursors behind it. The
@@ -43,19 +45,21 @@ internal class GallerySyncCoordinator(
 
         private const val REMOTE_UPSERT_CHUNK = 500
         private const val TOPIC_REQUEST_TIMEOUT_MS = 20_000L
-
-        /** TDLib's message for a request superseded by a newer one. */
-        private const val ABORTED = "request aborted"
     }
 
     private var oldestLoaded = Long.MAX_VALUE
-    private val topicCursors = mutableMapOf<Long, Long>()
+
+    /** Concurrent: loadMore runs on the caller while a pass runs on IO. */
+    private val topicCursors = ConcurrentHashMap<Long, Long>()
     private var topicJob: Job? = null
     private var mainHasMore = true
 
-    /** Completion callbacks fire on whichever thread the coroutine ends on. */
-    private val trackedJobs = mutableSetOf<Job>()
+    /** Cancellable so an account change or logout can't leave stale writes behind. */
+    private val trackedJobs = JobTracker()
     private var accountId = 0L
+
+    /** Two concurrent passes would race on the cursors and the watermarks. */
+    private val syncMutex = Mutex()
 
     /**
      * Whether to maintain the remote_media ledger. It exists only to dedupe
@@ -64,6 +68,7 @@ internal class GallerySyncCoordinator(
      */
     private var indexRemoteMedia = false
 
+    /** Records the current account so resets and dedupe are scoped to it. */
     fun setAccountId(value: Long) {
         accountId = value
     }
@@ -73,7 +78,21 @@ internal class GallerySyncCoordinator(
         indexRemoteMedia = enabled
     }
 
-    suspend fun syncAll() {
+    /**
+     * Tracked so an account change or logout cancels it: an uncancelled pass
+     * would keep writing the previous account's rows into the cleared database.
+     */
+    fun syncAll(): Job =
+        launchTracked {
+            if (!syncMutex.tryLock()) return@launchTracked
+            try {
+                syncOnce()
+            } finally {
+                syncMutex.unlock()
+            }
+        }
+
+    private suspend fun syncOnce() {
         val c = client() ?: return
         ensureAccountId(c)
         val savedOldest = settings.lastSyncedOldestId()
@@ -98,7 +117,7 @@ internal class GallerySyncCoordinator(
         } catch (e: Exception) {
             // TDLib reports a superseded in-flight request this way; the newer
             // pass already covers those messages.
-            if (e is TdException && e.message.orEmpty().contains(ABORTED, ignoreCase = true)) {
+            if (e is TdException && e.isRequestAborted) {
                 return
             }
             gallery.update { it.copy(syncError = true) }
@@ -182,16 +201,19 @@ internal class GallerySyncCoordinator(
         }
     }
 
+    /** Clears in-memory gallery state, the local cache and the sync watermarks. */
     suspend fun resetAfterLogout() {
         resetState()
         dao.clearGalleryData()
         settings.clearSyncWatermarks()
     }
 
+    /** Caches synced rows, chunked to keep binding counts bounded. */
     suspend fun upsertRemote(items: List<ItemEntity>) {
         items.chunked(REMOTE_UPSERT_CHUNK).forEach { dao.upsertRemote(it) }
     }
 
+    /** Adds messages to the remote dedupe ledger; no-op while remote dedupe is off. */
     suspend fun indexRemoteMessages(
         messages: List<TdApi.Message>,
         topicId: Long = 0L,
@@ -428,19 +450,29 @@ internal class GallerySyncCoordinator(
 
     private suspend fun syncAlbums() {
         val c = client() ?: return
-        try {
-            c.loadTopics().forEach { topic ->
-                try {
-                    syncAlbum(c, topic)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                }
+        val topics =
+            try {
+                c.loadTopics()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // The main library is already synced; say why albums are missing
+                // instead of leaving the tab silently empty.
+                toast("Could not load albums: ${e.message}")
+                return
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
+        var failed = 0
+        topics.forEach { topic ->
+            try {
+                syncAlbum(c, topic)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failed++
+                Log.w("GallerySync", "Album ${topic.id} failed to sync", e)
+            }
         }
+        if (failed > 0) gallery.update { it.copy(syncError = true) }
     }
 
     private suspend fun syncAlbum(
@@ -473,17 +505,11 @@ internal class GallerySyncCoordinator(
      * Launches sync work on IO and keeps it cancellable via [resetState], so
      * an account change or logout can't leave a pass writing the old account's rows.
      */
-    private fun launchTracked(block: suspend CoroutineScope.() -> Unit): Job {
-        val job = scope.launch(Dispatchers.IO) { block() }
-        synchronized(trackedJobs) { trackedJobs.add(job) }
-        job.invokeOnCompletion { synchronized(trackedJobs) { trackedJobs.remove(job) } }
-        return job
-    }
+    private fun launchTracked(block: suspend CoroutineScope.() -> Unit): Job = trackedJobs.launchIo(scope, block)
 
     /** Drops cursors, cancels in-flight sync work and clears the UI state. */
     fun resetState() {
-        synchronized(trackedJobs) { trackedJobs.toList() }.forEach { it.cancel() }
-        synchronized(trackedJobs) { trackedJobs.clear() }
+        trackedJobs.cancelAll()
         accountId = 0L
         oldestLoaded = Long.MAX_VALUE
         topicJob = null

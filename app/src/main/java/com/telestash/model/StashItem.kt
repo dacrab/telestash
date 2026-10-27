@@ -1,5 +1,6 @@
 package com.telestash.model
 
+import androidx.compose.runtime.Immutable
 import com.telestash.util.FileTypes
 import org.drinkless.tdlib.TdApi
 
@@ -16,7 +17,12 @@ internal class ParsedMessage(
     val remoteType: String,
 )
 
-/** A media item shown in the gallery, extracted from a Saved Messages message. */
+/**
+ * A media item shown in the gallery, extracted from a Saved Messages message.
+ * [Immutable] so grid cells stay skippable; [miniJpeg] is never mutated after
+ * it is parsed out of TDLib.
+ */
+@Immutable
 data class StashItem(
     val messageId: Long,
     val chatId: Long,
@@ -87,28 +93,23 @@ internal fun parse(message: TdApi.Message): ParsedMessage? =
                 remoteType = PHOTO,
             )
         }
-        is TdApi.MessageVideo ->
+        is TdApi.MessageVideo -> {
+            val video = content.video
             ParsedMessage(
                 item =
                     item(
                         message = message,
-                        file = content.video.video,
-                        name = content.video.fileName.ifBlank { "video_${message.id}.mp4" },
+                        file = video.video,
+                        name = video.fileName.ifBlank { "video_${message.id}.mp4" },
                         isVideo = true,
-                        thumbFileId =
-                            content.video.thumbnail
-                                ?.file
-                                ?.id ?: 0,
-                        miniJpeg = content.video.minithumbnail?.data,
+                        thumbFileId = video.thumbnail?.file?.id ?: 0,
+                        miniJpeg = video.minithumbnail?.data,
                     ),
-                remoteUniqueId =
-                    content.video.video.remote
-                        ?.uniqueId,
-                remoteFileId =
-                    content.video.video.remote
-                        ?.id,
+                remoteUniqueId = video.video.remote?.uniqueId,
+                remoteFileId = video.video.remote?.id,
                 remoteType = VIDEO,
             )
+        }
         else -> null
     }
 

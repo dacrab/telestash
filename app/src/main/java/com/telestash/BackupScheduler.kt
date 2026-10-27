@@ -18,6 +18,7 @@ internal class BackupScheduler(
 ) {
     private val workManager = WorkManager.getInstance(context.applicationContext)
 
+    /** Enables or cancels the periodic job and (re)applies the current constraints. */
     fun schedule(
         enabled: Boolean,
         wifiOnly: Boolean,

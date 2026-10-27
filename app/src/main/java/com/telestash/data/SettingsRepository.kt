@@ -1,16 +1,19 @@
 package com.telestash.data
 
 import android.content.Context
+import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
@@ -22,13 +25,18 @@ private object Keys {
     val AUTO_BACKUP = booleanPreferencesKey("auto_backup_enabled")
     val WIFI_ONLY = booleanPreferencesKey("backup_wifi_only")
     val CHARGING_ONLY = booleanPreferencesKey("backup_charging_only")
-    val BACKUP_FOLDERS = stringSetPreferencesKey("backup_folders")
     val DEDUPE = booleanPreferencesKey("dedupe_enabled")
     val REMOTE_DEDUPE = booleanPreferencesKey("remote_dedupe_enabled")
     val INSTANT_UPLOAD = booleanPreferencesKey("instant_upload_enabled")
     val SYNC_NEWEST = longPreferencesKey("sync_newest_message_id")
     val SYNC_OLDEST = longPreferencesKey("sync_oldest_message_id")
     val TELEGRAM_USER_ID = longPreferencesKey("telegram_user_id")
+
+    // v0.3.0 stored these as one comma-separated String. DataStore matches keys by
+    // name and casts unchecked, so the name had to change; the old value is still
+    // read as a fallback because dropping it would mean "back up every folder".
+    val LEGACY_BACKUP_FOLDERS = stringPreferencesKey("backup_folders")
+    val BACKUP_FOLDERS = stringSetPreferencesKey("backup_folders_v2")
 }
 
 /** User preferences and the stored Telegram app credentials. */
@@ -36,8 +44,15 @@ class SettingsRepository(
     context: Context,
 ) {
     private val store = context.settings
-    private val data = store.data
 
+    /** Falls back to defaults if the preferences file is corrupt, so first launch still works. */
+    private val data: Flow<Preferences> =
+        store.data.catch { cause ->
+            Log.e("SettingsRepository", "Unreadable preferences; using defaults", cause)
+            emit(emptyPreferences())
+        }
+
+    /** Reads the stored api_id/api_hash once; unset values come back as 0 and "". */
     suspend fun credentialsOnce(): Pair<Int, String> =
         data.first().let { (it[Keys.API_ID] ?: 0) to (it[Keys.API_HASH] ?: "") }
 
@@ -56,10 +71,23 @@ class SettingsRepository(
     val chargingOnly: Flow<Boolean> = data.map { it[Keys.CHARGING_ONLY] ?: false }
 
     /** Empty means "every folder", which is the default on a fresh install. */
-    val backupFolders: Flow<Set<String>> = data.map { it[Keys.BACKUP_FOLDERS] ?: emptySet() }
+    val backupFolders: Flow<Set<String>> =
+        data.map { preferences ->
+            preferences[Keys.BACKUP_FOLDERS]
+                ?: preferences[Keys.LEGACY_BACKUP_FOLDERS]
+                    .orEmpty()
+                    .split(',')
+                    .map(String::trim)
+                    .filter(String::isNotEmpty)
+                    .toSet()
+        }
 
     suspend fun setBackupFolders(folders: Set<String>) {
-        store.edit { it[Keys.BACKUP_FOLDERS] = folders }
+        store.edit { preferences ->
+            preferences[Keys.BACKUP_FOLDERS] = folders
+            // Scrub the old key so its String type is never read again.
+            preferences.remove(Keys.LEGACY_BACKUP_FOLDERS)
+        }
     }
 
     val dedupeEnabled: Flow<Boolean> = data.map { it[Keys.DEDUPE] ?: true }
@@ -110,6 +138,7 @@ class SettingsRepository(
         store.edit { it[Keys.TELEGRAM_USER_ID] = userId }
     }
 
+    /** Writes the three backup toggles in one edit, so they commit together. */
     suspend fun setBackupPreferences(
         enabled: Boolean,
         wifiOnly: Boolean,
