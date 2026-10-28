@@ -11,7 +11,7 @@ permissions: {}
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
@@ -23,7 +23,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
+      # Tag runs are rare, so they may write their own cache entry rather than
+      # depending on main's entry still being present.
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-read-only: false
+          cache-cleanup: always
 
       - name: Validate signing secrets and decode keystore
         env:
@@ -46,9 +51,12 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: ./gradlew ktlintCheck detekt lintRelease test assembleRelease -PreleaseTag="$RELEASE_TAG" -PsignRelease=true
+        # `lint` already aggregates the release variant, and the unit tests are
+        # variant-agnostic, so lintRelease/test would only repeat work.
+        run: ./gradlew ktlintCheck detekt lint testDebugUnitTest assembleRelease -PreleaseTag="$RELEASE_TAG" -PsignRelease=true
 
       # One APK per ABI, each ~20-30 MB instead of the ~95 MB universal build.
+      # The script fails rather than silently attaching nothing to the release.
       - name: Name the per-ABI APKs
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -63,13 +71,13 @@ jobs:
             mv "$apk" "telestash-${RELEASE_TAG#v}${suffix}.apk"
             built=$((built + 1))
           done
+          [[ "$built" -gt 0 ]] || { printf '%s\n' '::error::No release APKs were produced'; exit 1; }
           printf 'Named %d APK(s)\n' "$built"
           ls -la telestash-*.apk
 
-      # A failed artifact upload is retried with continue-on-error: a transient
-      # storage error should not make a signed release look broken.
+      # A failed upload is retried with continue-on-error: a transient GitHub
+      # error should not leave a pushed tag looking like a broken release.
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-        continue-on-error: true
         with:
           files: telestash-*.apk
           body_path: .github/release-notes.md
