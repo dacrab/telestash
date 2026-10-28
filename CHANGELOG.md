@@ -10,7 +10,14 @@ pre-releases and sort before the matching stable version.
 
 ## [Unreleased]
 
-Nothing yet. Version 0.4.0 is the next planned release.
+### Added
+
+- Debug builds are now attached to each release alongside the stable APKs
+  (`telestash-VERSION-<abi>-debug.apk`). They keep readable class and method
+  names for crash reports, are signed with the same key so they install over a
+  stable build, and are not debuggable.
+
+Version 0.4.0 is the next planned release.
 
 ## [0.3.0] - 2026-09-13
 
