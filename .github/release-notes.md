@@ -20,9 +20,8 @@ it works everywhere but is much larger.
 ### Debug builds
 
 Each ABI also has a `-debug` build (`telestash-VERSION-arm64-v8a-debug.apk`
-and so on). These are the same code without R8 minification, so stack traces
-and logs use the real class and method names — useful when reporting a crash.
+and so on): the same code without R8 minification, so crash reports show real
+class and method names. Larger and slower than the stable build.
 
-They are signed with the same key as the stable builds, so either one installs
-over the other without uninstalling, and they are **not** debuggable. They are
-larger, slower to start, and not recommended for everyday use.
+They install over the stable build without uninstalling, and vice versa. They
+are **not** debuggable.
