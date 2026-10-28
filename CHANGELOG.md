@@ -12,10 +12,9 @@ pre-releases and sort before the matching stable version.
 
 ### Added
 
-- Debug builds are now attached to each release alongside the stable APKs
-  (`telestash-VERSION-<abi>-debug.apk`). They keep readable class and method
-  names for crash reports, are signed with the same key so they install over a
-  stable build, and are not debuggable.
+- Debug builds (`-debug` APKs per ABI) are now attached to each release
+  alongside the stable APKs. They keep readable class names for crash reports,
+  install over a stable build, and are not debuggable.
 
 Version 0.4.0 is the next planned release.
 

@@ -6,7 +6,7 @@ lifecycle = "2.11.0"
 core = "1.19.1"
 activityCompose = "1.13.0"
 composeBom = "2026.09.00"
-coil = "2.7.0"
+coil = "3.6.3"
 coroutines = "1.11.0"
 room = "2.8.5"
 paging = "3.5.3"
@@ -28,7 +28,10 @@ androidx-foundation = { group = "androidx.compose.foundation", name = "foundatio
 androidx-ui = { group = "androidx.compose.ui", name = "ui" }
 androidx-material3 = { group = "androidx.compose.material3", name = "material3" }
 androidx-material-icons = { group = "androidx.compose.material", name = "material-icons-extended" }
-coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
+# Coil 3 is multiplatform and moved off android.graphics, so it renders
+# through its own Image type. Every source here is a local File or in-memory
+# JPEG, so no network artifact is required.
+coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
 room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
