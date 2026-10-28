@@ -52,7 +52,7 @@ jobs:
           git fetch --force --tags --unshallow 2>/dev/null || git fetch --force --tags
           bash scripts/check-changelog.sh --tag "$GITHUB_REF_NAME"
 
-      - name: Lint, test and build release APK
+      - name: Lint, test and build release and debug APKs
         env:
           KEYSTORE_FILE: ${{ runner.temp }}/release.keystore
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -61,27 +61,59 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         # `lint` already aggregates the release variant, and the unit tests are
         # variant-agnostic, so lintRelease/test would only repeat work.
-        run: ./gradlew ktlintCheck detekt lint testDebugUnitTest assembleRelease -PreleaseTag="$RELEASE_TAG" -PsignRelease=true
+        run: ./gradlew ktlintCheck detekt lint testDebugUnitTest assembleDebug assembleRelease -PreleaseTag="$RELEASE_TAG" -PsignRelease=true
 
       # One APK per ABI, each ~20-30 MB instead of the ~95 MB universal build.
-      # The script fails rather than silently attaching nothing to the release.
+      # Debug builds are named with a -debug suffix so they sort next to the
+      # build they correspond to. The script fails rather than silently
+      # attaching nothing to the release.
       - name: Name the per-ABI APKs
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           shopt -s nullglob
+          v=${RELEASE_TAG#v}
           built=0
           for apk in app/build/outputs/apk/release/app-*-release.apk; do
             abi=${apk#*app-}; abi=${abi%-release.apk}
             [[ "$abi" == "universal" ]] && abi=""
             suffix=${abi:+-$abi}
-            mv "$apk" "telestash-${RELEASE_TAG#v}${suffix}.apk"
+            mv "$apk" "telestash-${v}${suffix}.apk"
             built=$((built + 1))
           done
-          [[ "$built" -gt 0 ]] || { printf '%s\n' '::error::No release APKs were produced'; exit 1; }
+          for apk in app/build/outputs/apk/debug/app-*-debug.apk; do
+            abi=${apk#*app-}; abi=${abi%-debug.apk}
+            [[ "$abi" == "universal" ]] && abi=""
+            suffix=${abi:+-$abi}
+            mv "$apk" "telestash-${v}${suffix}-debug.apk"
+            built=$((built + 1))
+          done
+          [[ "$built" -gt 0 ]] || { printf '%s\n' '::error::No APKs were produced'; exit 1; }
           printf 'Named %d APK(s)\n' "$built"
           ls -la telestash-*.apk
+
+      # The debug APKs exist so people can install a build that keeps its
+      # unminified class names for crash reports. They are only useful if they
+      # can update over the release build (or vice versa), which needs an
+      # identical signer, and they must never ship debuggable.
+      - name: Verify APK signing and debug flags
+        run: |
+          set -euo pipefail
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner
+          AAPT2=$(dirname "$APKSIGNER")/aapt2
+          release_apk=$(ls telestash-*.apk | grep -v -- '-debug\.apk$' | head -1)
+          debug_apk=$(ls telestash-*-debug.apk | head -1)
+
+          "$APKSIGNER" verify --print-certs "$release_apk" | grep -i 'certificate SHA-256 digest' > /tmp/rel.txt
+          "$APKSIGNER" verify --print-certs "$debug_apk" | grep -i 'certificate SHA-256 digest' > /tmp/dbg.txt
+          diff -q /tmp/rel.txt /tmp/dbg.txt >/dev/null ||
+            { printf '%s\n' '::error::Release and debug APKs are signed by different keys'; exit 1; }
+
+          if "$AAPT2" dump badging "$debug_apk" | grep -q 'application-debuggable'; then
+            printf '%s\n' '::error::Published debug APK is still debuggable'; exit 1
+          fi
+          printf 'Signer matches; %s is not debuggable\n' "$(basename "$debug_apk")"
 
       # A failed upload is retried with continue-on-error: a transient GitHub
       # error should not leave a pushed tag looking like a broken release.
