@@ -26,9 +26,15 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      # Only main writes the Gradle caches. Enhanced caching stores ~1.5 GB of
+      # dependencies/transforms per branch, and every PR or Renovate branch used
+      # to write its own full copy, which blew the 500 MB Actions storage quota.
+      # Runs off main restore that entry read-only instead.
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
-          cache-read-only: false
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          # Runs build a release APK too, so keep this side of the cache lean.
+          cache-cleanup: always
 
       # One invocation: the configuration cache and daemon are reused, so
       # separate steps would only re-pay startup and dependency resolution.
@@ -37,7 +43,9 @@ jobs:
 
       # ABI splits apply to debug too, so pick the arm64 build (~48 MB) rather
       # than the ~117 MB universal one; it's what a real phone or emulator needs.
+      # Convenience only, so a storage-quota failure must not red-X a green build.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        continue-on-error: true
         with:
           name: telestash-debug-apk
           path: app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
