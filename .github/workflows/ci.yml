@@ -4,7 +4,10 @@ on:
   push:
     branches: [main, "renovate/**"]
   pull_request:
+  workflow_dispatch:
 
+# A push to main and the PR that caused it are the same code: keep the PR run
+# and let it supersede the push run, so a merge does not build the tree twice.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -14,7 +17,7 @@ permissions:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
