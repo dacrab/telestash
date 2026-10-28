@@ -44,6 +44,14 @@ jobs:
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
           [[ -s "$RUNNER_TEMP/release.keystore" ]] || { printf '%s\n' '::error::The decoded keystore is empty'; exit 1; }
 
+      # Refuse to publish a tag that CHANGELOG.md does not describe, so the
+      # changelog cannot drift behind the releases. Needs full history to see
+      # every tag; the default shallow clone would not.
+      - name: Validate the changelog entry for this tag
+        run: |
+          git fetch --force --tags --unshallow 2>/dev/null || git fetch --force --tags
+          bash scripts/check-changelog.sh --tag "$GITHUB_REF_NAME"
+
       - name: Lint, test and build release APK
         env:
           KEYSTORE_FILE: ${{ runner.temp }}/release.keystore

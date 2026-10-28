@@ -45,6 +45,17 @@ universal build (`app-arm64-v8a-debug.apk` is what most phones need).
 
 Or open the project in Android Studio and press Run.
 
+## Releasing
+
+Releases are cut by pushing a `v<major>.<minor>.<patch>` tag. Before tagging,
+add an entry for that version to [CHANGELOG.md](CHANGELOG.md) — the release
+workflow refuses to publish a tag the changelog does not describe.
+
+```bash
+bash scripts/check-changelog.sh            # validate on demand
+bash scripts/check-changelog.sh --tag v1.0.0
+```
+
 ## Good to know
 
 - Telegram allows files up to **2 GB** each (4 GB with Premium) — plenty for photos and most videos.
