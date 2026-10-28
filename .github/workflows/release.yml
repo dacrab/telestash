@@ -63,10 +63,8 @@ jobs:
         # variant-agnostic, so lintRelease/test would only repeat work.
         run: ./gradlew ktlintCheck detekt lint testDebugUnitTest assembleDebug assembleRelease -PreleaseTag="$RELEASE_TAG" -PsignRelease=true
 
-      # One APK per ABI, each ~20-30 MB instead of the ~95 MB universal build.
-      # Debug builds are named with a -debug suffix so they sort next to the
-      # build they correspond to. The script fails rather than silently
-      # attaching nothing to the release.
+      # One APK per ABI for both variants. Fails rather than silently attaching
+      # nothing to the release.
       - name: Name the per-ABI APKs
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -93,10 +91,8 @@ jobs:
           printf 'Named %d APK(s)\n' "$built"
           ls -la telestash-*.apk
 
-      # The debug APKs exist so people can install a build that keeps its
-      # unminified class names for crash reports. They are only useful if they
-      # can update over the release build (or vice versa), which needs an
-      # identical signer, and they must never ship debuggable.
+      # Users can update between the two builds only if the signer matches, and a
+      # published debug APK must never be debuggable.
       - name: Verify APK signing and debug flags
         run: |
           set -euo pipefail

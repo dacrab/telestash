@@ -101,15 +101,9 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
-        // Only when cutting a release: sign the debug variant with the release
-        // key, so the two APKs share a signature and either can be installed
-        // over the other. `isDebuggable = false` is what makes it safe to
-        // publish: the variant stays a real debug build (no R8, unminified,
-        // buildConfigField DEBUG=true) but loses the manifest flag that would
-        // otherwise let anyone JDWP-attach and read the app's private TDLib
-        // session. AGP honours this override on the built-in debug type --
-        // verified with `aapt2 dump badging`, which stops reporting
-        // application-debuggable.
+        // Releases also ship the debug build: it must share the release signature
+        // so either APK updates over the other, and must not be debuggable or
+        // anyone could JDWP-attach and read the TDLib session.
         if (signRelease) {
             getByName("debug") {
                 signingConfig = signingConfigs.getByName("release")
