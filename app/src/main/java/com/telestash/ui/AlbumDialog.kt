@@ -10,7 +10,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PhotoAlbum
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -43,6 +46,7 @@ fun NewAlbumDialog(
     val duplicate = albums.any { it.name.equals(trimmed, ignoreCase = true) }
     AlertDialog(
         onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Filled.PhotoAlbum, contentDescription = null) },
         title = { Text("New album") },
         text = {
             Column {
@@ -97,6 +101,7 @@ fun AddToAlbumDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Filled.PhotoAlbum, contentDescription = null) },
         title = { Text("Move $countText to an album") },
         text = {
             Column {

@@ -1,6 +1,10 @@
 package com.telestash.ui
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -108,6 +112,7 @@ fun DialogHost(
     if (dialogs.confirmLogout) {
         AlertDialog(
             onDismissRequest = { dialogs.confirmLogout = false },
+            icon = { Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null) },
             title = { Text("Log out?") },
             text = { Text("You'll need to sign in again with your phone number.") },
             confirmButton = {
@@ -141,6 +146,8 @@ private fun DeleteConfirmDialog(
     onDismiss: () -> Unit,
 ) = AlertDialog(
     onDismissRequest = onDismiss,
+    icon = { Icon(Icons.Filled.Delete, contentDescription = null) },
+    iconContentColor = MaterialTheme.colorScheme.error,
     title = { Text(if (count == 1) "Delete this item?" else "Delete $count items?") },
     text = {
         Text(

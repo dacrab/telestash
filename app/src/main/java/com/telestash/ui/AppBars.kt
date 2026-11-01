@@ -1,55 +1,50 @@
 package com.telestash.ui
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.foundation.LocalIndication
-import androidx.compose.foundation.background
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PhotoAlbum
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FloatingToolbarDefaults
+import androidx.compose.material3.HorizontalFloatingToolbar
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.MediumFlexibleTopAppBar
+import androidx.compose.material3.ShortNavigationBar
+import androidx.compose.material3.ShortNavigationBarItem
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.telestash.AppViewModel
 import com.telestash.GalleryUi
 
-/** Corner radius of the tab indicator pill. */
-private val TabPillShape = RoundedCornerShape(50)
+/** Corner radius of the floating navigation pill. */
+private val NavPillShape = RoundedCornerShape(28.dp)
 
 /** Callbacks the top bars invoke, grouped so the bar API stays readable. */
 @Stable
@@ -61,18 +56,35 @@ class TopBarActions(
     val onDeleteSelected: () -> Unit,
     val onBack: () -> Unit,
     val onSettings: () -> Unit,
-    val onNewAlbum: () -> Unit,
 )
 
-/** Library/Albums navigation bar with the animated selected pill. */
+/** Floating expressive navigation pill with icon-only inactive destinations. */
 @Composable
 fun BottomNav(
     selected: Int,
     onSelect: (Int) -> Unit,
 ) {
-    NavigationBar {
-        NavItem(AppViewModel.TAB_PHOTOS, "Library", Icons.Filled.PhotoLibrary, selected, onSelect, Modifier.weight(1f))
-        NavItem(AppViewModel.TAB_ALBUMS, "Albums", Icons.Filled.PhotoAlbum, selected, onSelect, Modifier.weight(1f))
+    Box(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        Surface(
+            shape = NavPillShape,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shadowElevation = 3.dp,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            ShortNavigationBar(
+                containerColor = Color.Transparent,
+                windowInsets = WindowInsets(0, 0, 0, 0),
+            ) {
+                NavItem(AppViewModel.TAB_PHOTOS, "Library", Icons.Filled.PhotoLibrary, selected, onSelect)
+                NavItem(AppViewModel.TAB_ALBUMS, "Albums", Icons.Filled.PhotoAlbum, selected, onSelect)
+            }
+        }
     }
 }
 
@@ -83,47 +95,13 @@ private fun NavItem(
     icon: ImageVector,
     selected: Int,
     onSelect: (Int) -> Unit,
-    modifier: Modifier = Modifier,
 ) {
-    val selectedItem = selected == tab
-    val contentColor =
-        if (selectedItem) {
-            MaterialTheme.colorScheme.primary
-        } else {
-            MaterialTheme.colorScheme.onSurfaceVariant
-        }
-    val interactionSource = remember { MutableInteractionSource() }
-    val pill by animateColorAsState(
-        if (selectedItem) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-        label = "navPill",
+    ShortNavigationBarItem(
+        selected = selected == tab,
+        onClick = { onSelect(tab) },
+        icon = { Icon(icon, contentDescription = null) },
+        label = { Text(label) },
     )
-    Column(
-        modifier =
-            modifier
-                .selectable(
-                    selected = selectedItem,
-                    onClick = { onSelect(tab) },
-                    role = Role.Tab,
-                    interactionSource = interactionSource,
-                    indication = LocalIndication.current,
-                ),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Box(
-            modifier =
-                Modifier
-                    .height(30.dp)
-                    .widthIn(min = 64.dp)
-                    .clip(TabPillShape)
-                    .background(pill),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(icon, contentDescription = label, tint = contentColor)
-        }
-        Spacer(Modifier.height(2.dp))
-        Text(label, style = MaterialTheme.typography.labelMedium, color = contentColor)
-    }
 }
 
 /** Picks the top bar that matches the current navigation state. */
@@ -135,83 +113,87 @@ fun TopBars(
     albumName: String?,
     inAlbum: Boolean,
     actions: TopBarActions,
+    scrollBehavior: TopAppBarScrollBehavior,
 ) {
-    val selectedCount = gallery.selected?.size ?: 0
     when {
         gallery.selected != null ->
             SelectionTopBar(
-                count = selectedCount,
+                count = gallery.selected.size,
                 onCancel = actions.onCancelSelection,
                 onSelectAll = actions.onSelectAll,
-                onAddToAlbum = actions.onAddToAlbum,
-                onDownload = actions.onDownloadSelected,
-                onDelete = actions.onDeleteSelected,
             )
 
-        selectedTab == AppViewModel.TAB_SETTINGS -> SimpleTopBar("Settings")
+        selectedTab == AppViewModel.TAB_SETTINGS ->
+            TopAppBar(
+                title = {
+                    Text("Settings", Modifier.semantics { heading() })
+                },
+                navigationIcon = {
+                    IconButton(onClick = actions.onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to library")
+                    }
+                },
+            )
 
-        inAlbum -> BackTopBar(albumName ?: "Album", actions.onBack, actions.onSettings)
+        inAlbum ->
+            MediumFlexibleTopAppBar(
+                title = {
+                    Text(albumName ?: "Album", Modifier.semantics { heading() })
+                },
+                subtitle = { Text("Album") },
+                navigationIcon = {
+                    IconButton(onClick = actions.onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to albums")
+                    }
+                },
+                actions = { SettingsButton(actions.onSettings) },
+                scrollBehavior = scrollBehavior,
+            )
 
-        selectedTab == AppViewModel.TAB_ALBUMS -> SimpleTopBar("Albums", actions.onSettings, actions.onNewAlbum)
+        selectedTab == AppViewModel.TAB_ALBUMS ->
+            LargeFlexibleTopAppBar(
+                title = {
+                    Text("Albums", Modifier.semantics { heading() })
+                },
+                subtitle = { Text(albumSubtitle(gallery)) },
+                actions = { SettingsButton(actions.onSettings) },
+                scrollBehavior = scrollBehavior,
+            )
 
-        else -> SimpleTopBar("Library", actions.onSettings)
+        else ->
+            LargeFlexibleTopAppBar(
+                title = {
+                    Text("Library", Modifier.semantics { heading() })
+                },
+                subtitle = { Text(librarySubtitle(gallery)) },
+                actions = { SettingsButton(actions.onSettings) },
+                scrollBehavior = scrollBehavior,
+            )
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** A tonal circular settings affordance instead of a bare icon. */
 @Composable
-private fun SimpleTopBar(
-    title: String,
-    onSettings: (() -> Unit)? = null,
-    onNewAlbum: (() -> Unit)? = null,
-) {
-    TopAppBar(
-        title = {
-            Text(
-                title,
-                modifier = Modifier.semantics { heading() },
-            )
-        },
-        actions = {
-            if (onNewAlbum != null) {
-                IconButton(onClick = onNewAlbum) {
-                    Icon(Icons.Filled.Add, contentDescription = "New album")
-                }
-            }
-            if (onSettings != null) {
-                IconButton(onClick = onSettings) {
-                    Icon(Icons.Filled.Settings, contentDescription = "Settings")
-                }
-            }
-        },
-    )
+private fun SettingsButton(onClick: () -> Unit) {
+    FilledTonalIconButton(onClick = onClick) {
+        Icon(Icons.Filled.Settings, contentDescription = "Settings")
+    }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun BackTopBar(
-    title: String,
-    onBack: () -> Unit,
-    onSettings: () -> Unit,
-) {
-    TopAppBar(
-        title = {
-            Text(
-                title,
-                modifier = Modifier.semantics { heading() },
-            )
-        },
-        navigationIcon = {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-            }
-        },
-        actions = {
-            IconButton(onClick = onSettings) {
-                Icon(Icons.Filled.Settings, contentDescription = "Settings")
-            }
-        },
-    )
+private fun librarySubtitle(gallery: GalleryUi): String =
+    when {
+        gallery.syncing -> "Syncing with Telegram…"
+        gallery.syncError -> "Offline · showing saved items"
+        else -> "Your Telegram Saved Messages"
+    }
+
+private fun albumSubtitle(gallery: GalleryUi): String {
+    val count = gallery.albums.size
+    return when {
+        count == 0 -> "Group related media"
+        count == 1 -> "1 album"
+        else -> "$count albums"
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -220,11 +202,7 @@ private fun SelectionTopBar(
     count: Int,
     onCancel: () -> Unit,
     onSelectAll: () -> Unit,
-    onAddToAlbum: () -> Unit,
-    onDownload: () -> Unit,
-    onDelete: () -> Unit,
 ) {
-    var menuOpen by remember { mutableStateOf(false) }
     TopAppBar(
         title = {
             Text(
@@ -233,38 +211,59 @@ private fun SelectionTopBar(
             )
         },
         navigationIcon = {
-            IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, contentDescription = "Cancel") }
+            IconButton(onClick = onCancel) { Icon(Icons.Filled.Close, contentDescription = "Cancel selection") }
         },
         actions = {
             IconButton(onClick = onSelectAll) {
                 Icon(Icons.Filled.SelectAll, contentDescription = "Select all loaded")
             }
-            IconButton(onClick = { menuOpen = true }) {
-                Icon(Icons.Filled.MoreVert, contentDescription = "More actions")
-            }
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text("Move to album") },
-                    onClick = {
-                        menuOpen = false
-                        onAddToAlbum()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("Save to device") },
-                    onClick = {
-                        menuOpen = false
-                        onDownload()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("Delete") },
-                    onClick = {
-                        menuOpen = false
-                        onDelete()
-                    },
-                )
-            }
         },
+        colors =
+            TopAppBarDefaults.topAppBarColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            ),
     )
+}
+
+/**
+ * Expressive replacement for the old selection overflow menu: the bulk actions
+ * live in a vibrant floating pill right above the gesture bar.
+ */
+@Composable
+fun SelectionToolbar(
+    count: Int,
+    onAddToAlbum: () -> Unit,
+    onDownload: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Box(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        HorizontalFloatingToolbar(
+            expanded = true,
+            colors = FloatingToolbarDefaults.vibrantFloatingToolbarColors(),
+            leadingContent = {
+                Text(
+                    itemCount(count),
+                    style = MaterialTheme.typography.labelLargeEmphasized,
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                )
+            },
+        ) {
+            IconButton(onClick = onAddToAlbum) {
+                Icon(Icons.Filled.PhotoAlbum, contentDescription = "Move to album")
+            }
+            IconButton(onClick = onDownload) {
+                Icon(Icons.Filled.Download, contentDescription = "Save to device")
+            }
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Filled.Delete, contentDescription = "Delete")
+            }
+        }
+    }
 }

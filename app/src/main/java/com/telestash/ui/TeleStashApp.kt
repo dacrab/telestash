@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -14,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -23,6 +23,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.TopAppBarScrollBehavior
+import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
@@ -32,6 +35,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -46,6 +50,7 @@ import com.telestash.data.TopicStats
 import com.telestash.model.StashItem
 import com.telestash.ui.albums.AlbumsScreen
 import com.telestash.ui.auth.AuthScreen
+import com.telestash.ui.components.AppLoadingIndicator
 import com.telestash.ui.gallery.GalleryScreen
 import com.telestash.ui.gallery.TimelineRow
 import com.telestash.ui.gallery.snapshotPhotos
@@ -76,6 +81,14 @@ fun TeleStashApp(
     LaunchedEffect(vm) { vm.toasts.collect { snackbar.showSnackbar(it) } }
 
     val chrome = chrome(isReady, selecting, selectedTab, inAlbum)
+    // One shared scroll behavior keeps the flexible headers collapsing with the
+    // grid; reset it whenever the destination changes so each screen starts tall.
+    val topBarState = rememberTopAppBarState()
+    val topBarScroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(state = topBarState)
+    LaunchedEffect(selectedTab, inAlbum) {
+        topBarState.heightOffset = 0f
+        topBarState.contentOffset = 0f
+    }
 
     // System back unwinds one layer at a time before leaving the app.
     BackHandler(enabled = chrome.handleBack) {
@@ -95,13 +108,24 @@ fun TeleStashApp(
                     gallery = gallery,
                     albumName = gallery.albums.find { it.topicId == openTopicId }?.name,
                     inAlbum = inAlbum,
-                    actions = rememberTopBarActions(vm, dialogs, photos, gallery),
+                    actions = rememberTopBarActions(vm, dialogs, photos, gallery, selectedTab),
+                    scrollBehavior = topBarScroll,
                 )
             }
         },
         bottomBar = {
-            if (chrome.showBottomNav) {
-                BottomNav(selected = selectedTab, onSelect = vm::selectTab)
+            when {
+                selecting ->
+                    SelectionToolbar(
+                        count = gallery.selected?.size ?: 0,
+                        onAddToAlbum = { dialogs.showAddToAlbum = true },
+                        onDownload = { vm.downloadSelected() },
+                        onDelete = {
+                            dialogs.pendingDelete = DialogState.DeleteSelection(gallery.selected?.size ?: 0)
+                        },
+                    )
+
+                chrome.showBottomNav -> BottomNav(selected = selectedTab, onSelect = vm::selectTab)
             }
         },
         floatingActionButton = {
@@ -125,6 +149,7 @@ fun TeleStashApp(
                     openTopicId = openTopicId,
                     albumCounts = albumCounts,
                     padding = padding,
+                    topBarScroll = topBarScroll,
                     onOpenViewer = { dialogs.viewer = it },
                     onNewAlbum = { dialogs.showNewAlbum = true },
                     onLogout = { dialogs.confirmLogout = true },
@@ -156,7 +181,14 @@ private fun AuthGate(
     Box(
         Modifier
             .fillMaxSize()
-            .padding(padding),
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                        MaterialTheme.colorScheme.surface,
+                    ),
+                ),
+            ).padding(padding),
         contentAlignment = Alignment.Center,
     ) {
         when (content) {
@@ -177,6 +209,7 @@ private fun TabContent(
     openTopicId: Long,
     albumCounts: List<TopicStats>?,
     padding: PaddingValues,
+    topBarScroll: TopAppBarScrollBehavior,
     onOpenViewer: (StashItem) -> Unit,
     onNewAlbum: () -> Unit,
     onLogout: () -> Unit,
@@ -195,6 +228,7 @@ private fun TabContent(
                     selectedTab = selectedTab,
                     openTopicId = openTopicId,
                     padding = padding,
+                    topBarScroll = topBarScroll,
                     onItemClick = onOpenViewer,
                 )
             } else {
@@ -204,6 +238,7 @@ private fun TabContent(
                     countsLoaded = albumCounts != null,
                     isLoading = gallery.syncing,
                     padding = padding,
+                    topBarScroll = topBarScroll,
                     onOpen = vm::openTopic,
                     onNewAlbum = onNewAlbum,
                 )
@@ -217,6 +252,7 @@ private fun TabContent(
                 selectedTab = selectedTab,
                 openTopicId = 0L,
                 padding = padding,
+                topBarScroll = topBarScroll,
                 onItemClick = onOpenViewer,
             )
     }
@@ -249,9 +285,9 @@ private fun BrandedLoading() {
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
     ) {
-        Text("TeleStash", style = MaterialTheme.typography.displaySmall)
-        Spacer(Modifier.height(16.dp))
-        CircularProgressIndicator()
+        Text("TeleStash", style = MaterialTheme.typography.displaySmallEmphasized)
+        Spacer(Modifier.height(20.dp))
+        AppLoadingIndicator(size = 44.dp)
         Spacer(Modifier.height(12.dp))
         Text("Starting TeleStash…", style = MaterialTheme.typography.bodyMedium)
     }
@@ -295,9 +331,9 @@ private class AppChrome(
 )
 
 /**
- * Settings takes over the screen (no tabs, no FAB), multi-select hides the
- * chrome behind the selection bar, and the album list swaps the add FAB for
- * "New album".
+ * Settings takes over the screen (no tabs, no FAB) and multi-select hides the
+ * chrome behind the selection bar. The album list keeps the FAB, which swaps to
+ * "New album" there.
  */
 private fun chrome(
     isReady: Boolean,
@@ -306,10 +342,9 @@ private fun chrome(
     inAlbum: Boolean,
 ): AppChrome {
     val onSettings = selectedTab == AppViewModel.TAB_SETTINGS
-    val onAlbumList = selectedTab == AppViewModel.TAB_ALBUMS && !inAlbum
     return AppChrome(
         showBottomNav = isReady && !selecting && !onSettings,
-        showFab = isReady && !selecting && !onSettings && !onAlbumList,
+        showFab = isReady && !selecting && !onSettings,
         handleBack = isReady && (selecting || inAlbum || onSettings),
     )
 }
@@ -325,9 +360,10 @@ private fun rememberTopBarActions(
     dialogs: DialogHostState,
     photos: LazyPagingItems<TimelineRow>,
     gallery: GalleryUi,
+    selectedTab: Int,
 ): TopBarActions {
     val galleryState = rememberUpdatedState(gallery)
-    return remember(vm, dialogs) {
+    return remember(vm, dialogs, selectedTab) {
         TopBarActions(
             onCancelSelection = vm::exitSelectionMode,
             onSelectAll = { vm.selectAll(snapshotPhotos(photos)) },
@@ -336,9 +372,14 @@ private fun rememberTopBarActions(
             onDeleteSelected = {
                 dialogs.pendingDelete = DialogState.DeleteSelection(galleryState.value.selected?.size ?: 0)
             },
-            onBack = { vm.closeTopic() },
+            onBack = {
+                if (selectedTab == AppViewModel.TAB_SETTINGS) {
+                    vm.selectTab(AppViewModel.TAB_PHOTOS)
+                } else {
+                    vm.closeTopic()
+                }
+            },
             onSettings = { vm.selectTab(AppViewModel.TAB_SETTINGS) },
-            onNewAlbum = { dialogs.showNewAlbum = true },
         )
     }
 }

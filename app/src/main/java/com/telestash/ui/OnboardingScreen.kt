@@ -1,6 +1,5 @@
 package com.telestash.ui
 
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -28,7 +27,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -54,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.AppViewModel
 import com.telestash.AppViewModel.Companion.MIN_API_HASH_LENGTH
+import com.telestash.ui.components.ShapeBackdrop
 
 /** Telegram api_id values are numeric IDs; a plausible one is at least this many digits. */
 private const val MIN_API_ID_LENGTH = 6
@@ -90,24 +89,21 @@ fun OnboardingScreen(vm: AppViewModel) {
 /** The logo, name and one-line pitch shown above the form. */
 @Composable
 private fun BrandHeader() {
-    Surface(
-        shape = MaterialTheme.shapes.large,
+    ShapeBackdrop(
+        modifier = Modifier.size(88.dp),
         color = MaterialTheme.colorScheme.primaryContainer,
-        modifier = Modifier.size(72.dp),
     ) {
-        Box(contentAlignment = Alignment.Center) {
-            Icon(
-                Icons.Filled.PhotoLibrary,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                modifier = Modifier.size(36.dp),
-            )
-        }
+        Icon(
+            Icons.Filled.PhotoLibrary,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.size(44.dp),
+        )
     }
     Spacer(Modifier.height(16.dp))
     Text(
         "TeleStash",
-        style = MaterialTheme.typography.displaySmall,
+        style = MaterialTheme.typography.displaySmallEmphasized,
         modifier = Modifier.semantics { heading() },
     )
     Spacer(Modifier.height(4.dp))
@@ -129,7 +125,7 @@ private fun CredentialsCard(vm: AppViewModel) {
     val idValid = apiId.length >= MIN_API_ID_LENGTH
     val hashValid = apiHash.trim().length >= MIN_API_HASH_LENGTH
 
-    Card(Modifier.fillMaxWidth()) {
+    Card(shape = MaterialTheme.shapes.extraLarge, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
             Text("Connect your Telegram app", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(4.dp))
@@ -260,7 +256,7 @@ private fun FeatureRow(
         )
         Spacer(Modifier.width(12.dp))
         Column {
-            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(title, style = MaterialTheme.typography.titleSmallEmphasized)
             Text(
                 subtitle,
                 style = MaterialTheme.typography.bodySmall,

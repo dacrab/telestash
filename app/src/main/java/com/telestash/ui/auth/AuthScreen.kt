@@ -16,6 +16,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -46,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.telestash.AppViewModel
 import com.telestash.AuthUi
+import com.telestash.ui.components.ShapeBackdrop
 import kotlinx.coroutines.delay
 import kotlin.math.ceil
 
@@ -90,9 +92,21 @@ fun AuthScreen(
             Spacer(Modifier.height(48.dp))
         }
 
+        ShapeBackdrop(
+            modifier = Modifier.size(76.dp),
+            color = MaterialTheme.colorScheme.primaryContainer,
+        ) {
+            Icon(
+                Icons.Filled.PhotoLibrary,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(38.dp),
+            )
+        }
+        Spacer(Modifier.height(16.dp))
         Text(
             "TeleStash",
-            style = MaterialTheme.typography.displaySmall,
+            style = MaterialTheme.typography.displaySmallEmphasized,
             modifier = Modifier.semantics { heading() },
         )
         Spacer(Modifier.height(4.dp))
@@ -211,7 +225,7 @@ private fun CodeStep(
     }
 
     Surface(
-        shape = MaterialTheme.shapes.medium,
+        shape = MaterialTheme.shapes.large,
         color = MaterialTheme.colorScheme.primaryContainer,
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -286,7 +300,7 @@ private fun PasswordStep(
     var pw by remember { mutableStateOf("") }
     if (hint.isNotBlank()) {
         Surface(
-            shape = MaterialTheme.shapes.medium,
+            shape = MaterialTheme.shapes.large,
             color = MaterialTheme.colorScheme.surfaceVariant,
             modifier = Modifier.fillMaxWidth(),
         ) {

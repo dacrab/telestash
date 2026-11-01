@@ -6,6 +6,9 @@ lifecycle = "2.11.0"
 core = "1.19.1"
 activityCompose = "1.13.0"
 composeBom = "2026.09.00"
+# First release line that publishes the M3 Expressive components (motion
+# schemes, Expressive theming, floating toolbars, wavy indicators, shapes).
+material3 = "1.5.0-beta02"
 coil = "3.6.3"
 coroutines = "1.11.0"
 room = "2.8.5"
@@ -26,7 +29,7 @@ androidx-activity-compose = { group = "androidx.activity", name = "activity-comp
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 androidx-foundation = { group = "androidx.compose.foundation", name = "foundation" }
 androidx-ui = { group = "androidx.compose.ui", name = "ui" }
-androidx-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
 androidx-material-icons = { group = "androidx.compose.material", name = "material-icons-extended" }
 # Coil 3 is multiplatform and moved off android.graphics, so it renders
 # through its own Image type. Every source here is a local File or in-memory

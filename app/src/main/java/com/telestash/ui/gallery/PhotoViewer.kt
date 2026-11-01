@@ -15,6 +15,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material3.FloatingToolbarDefaults
+import androidx.compose.material3.HorizontalFloatingToolbar
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -88,27 +90,6 @@ fun PhotoViewerDialog(
                             color = Color.White,
                             maxLines = 1,
                         )
-                        if (items.size > 1) {
-                            Text(
-                                "${pagerState.currentPage + 1} / ${items.size}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.White.copy(alpha = 0.7f),
-                            )
-                        }
-                    }
-                    IconButton(onClick = { onDownload(current) }) {
-                        Icon(
-                            Icons.Filled.Download,
-                            contentDescription = "Save to device",
-                            tint = Color.White,
-                        )
-                    }
-                    IconButton(onClick = { onDelete(current) }) {
-                        Icon(
-                            Icons.Filled.Delete,
-                            contentDescription = "Delete",
-                            tint = Color.White,
-                        )
                     }
                 }
 
@@ -139,17 +120,40 @@ fun PhotoViewerDialog(
                     }
                 }
 
-                Text(
-                    "${current.fileName} · ${Format.size(current.sizeBytes)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.8f),
-                    maxLines = 1,
+                Column(
                     modifier =
                         Modifier
                             .fillMaxWidth()
                             .navigationBarsPadding()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                )
+                            .padding(bottom = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        "${current.fileName} · ${Format.size(current.sizeBytes)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.75f),
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                    )
+                    HorizontalFloatingToolbar(
+                        expanded = true,
+                        colors = FloatingToolbarDefaults.vibrantFloatingToolbarColors(),
+                        leadingContent = {
+                            Text(
+                                "${pagerState.currentPage + 1} / ${items.size}",
+                                style = MaterialTheme.typography.labelLargeEmphasized,
+                                modifier = Modifier.padding(horizontal = 8.dp),
+                            )
+                        },
+                    ) {
+                        IconButton(onClick = { onDownload(current) }) {
+                            Icon(Icons.Filled.Download, contentDescription = "Save to device")
+                        }
+                        IconButton(onClick = { onDelete(current) }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Delete")
+                        }
+                    }
+                }
             }
         }
     }

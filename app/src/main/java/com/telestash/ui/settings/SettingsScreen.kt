@@ -1,5 +1,6 @@
 package com.telestash.ui.settings
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,8 +28,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
@@ -44,6 +45,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
@@ -59,6 +61,7 @@ import com.telestash.UploadProgress
 import com.telestash.backup.BackupGate
 import com.telestash.device.DeviceFolder
 import com.telestash.device.DeviceMedia
+import com.telestash.ui.components.AppLoadingIndicator
 import com.telestash.ui.itemCount
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -250,7 +253,7 @@ private fun LazyListScope.foldersSection(
     item { SectionHeader("Folders to back up") }
     if (hasPartialMediaPermission) {
         item {
-            Card(Modifier.fillMaxWidth()) {
+            Card(shape = MaterialTheme.shapes.large, modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
                     Text(
                         "Photo access is partial. TeleStash can back up the items you selected.",
@@ -274,7 +277,7 @@ private fun LazyListScope.foldersSection(
         }
     } else if (!hasMediaPermission) {
         item {
-            Card(Modifier.fillMaxWidth()) {
+            Card(shape = MaterialTheme.shapes.large, modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
                     Text(
                         "TeleStash needs access to your photos and videos to back them up.",
@@ -289,7 +292,7 @@ private fun LazyListScope.foldersSection(
     } else if (foldersLoading) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                AppLoadingIndicator(size = 20.dp)
                 Spacer(Modifier.width(12.dp))
                 Text("Scanning folders…", style = MaterialTheme.typography.bodyMedium)
             }
@@ -389,6 +392,7 @@ private fun BackupStatusCard(
 
     val actionLabel = if (waitReason != null) "Back up anyway" else "Back up now"
     Card(
+        shape = MaterialTheme.shapes.extraLarge,
         colors =
             CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -398,39 +402,45 @@ private fun BackupStatusCard(
                 .fillMaxWidth()
                 .semantics { liveRegion = LiveRegionMode.Polite },
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(16.dp),
-        ) {
-            Icon(
-                Icons.Filled.CloudUpload,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = color,
-                    modifier = Modifier.semantics { heading() },
+        Column(Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.CloudUpload,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
-                Text(
-                    subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                )
-            }
-            if (autoBackup) {
-                TextButton(onClick = onBackupNow) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Login,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.titleMediumEmphasized,
+                        color = color,
+                        modifier = Modifier.semantics { heading() },
                     )
-                    Spacer(Modifier.width(4.dp))
-                    Text(actionLabel)
+                    Text(
+                        subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                    )
                 }
+                if (autoBackup) {
+                    TextButton(onClick = onBackupNow) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Login,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(actionLabel)
+                    }
+                }
+            }
+            if (uploadProgress != null) {
+                Spacer(Modifier.height(12.dp))
+                LinearWavyProgressIndicator(
+                    progress = { uploadProgress.fraction },
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
         }
     }
@@ -442,7 +452,7 @@ private fun NotificationPermissionCard(
     onRequestPermission: () -> Unit,
     onOpenAppSettings: () -> Unit,
 ) {
-    Card(Modifier.fillMaxWidth()) {
+    Card(shape = MaterialTheme.shapes.large, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
             Text(
                 if (denied) {
@@ -467,11 +477,11 @@ private fun NotificationPermissionCard(
 private fun SectionHeader(title: String) {
     Text(
         title,
-        style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.primary,
+        style = MaterialTheme.typography.titleMediumEmphasized,
+        color = MaterialTheme.colorScheme.onSurface,
         modifier =
             Modifier
-                .padding(top = 12.dp, bottom = 2.dp)
+                .padding(top = 16.dp, bottom = 4.dp)
                 .semantics { heading() },
     )
 }
@@ -499,12 +509,14 @@ private fun SettingSwitch(
         modifier =
             Modifier
                 .fillMaxWidth()
+                .clip(MaterialTheme.shapes.large)
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .toggleable(
                     value = checked,
                     onValueChange = onCheckedChange,
                     enabled = enabled,
                     role = Role.Switch,
-                ).padding(vertical = 8.dp),
+                ).padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         Column(Modifier.weight(1f)) {
             Text(label, style = MaterialTheme.typography.bodyLarge)
@@ -540,12 +552,14 @@ private fun FolderRow(
         modifier =
             Modifier
                 .fillMaxWidth()
+                .clip(MaterialTheme.shapes.large)
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .toggleable(
                     value = checked,
                     onValueChange = onCheckedChange,
                     enabled = enabled,
                     role = Role.Checkbox,
-                ),
+                ).padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         Column(Modifier.weight(1f)) {
             Text(label, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
@@ -606,7 +620,7 @@ private fun LazyListScope.mediaSection(
 private fun LazyListScope.accountSection(onLogout: () -> Unit) {
     item { SectionHeader("Account") }
     item {
-        Card(Modifier.fillMaxWidth()) {
+        Card(shape = MaterialTheme.shapes.large, modifier = Modifier.fillMaxWidth()) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(16.dp),
@@ -661,7 +675,7 @@ fun CleanupSection(vm: AppViewModel) {
     Spacer(Modifier.height(4.dp))
     Row(verticalAlignment = Alignment.CenterVertically) {
         if (scanning) {
-            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+            AppLoadingIndicator(size = 24.dp)
         } else {
             CleanupScanButton(
                 busy = cleaning,
