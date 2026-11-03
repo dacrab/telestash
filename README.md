@@ -1,73 +1,37 @@
 # TeleStash
 
-A Google Photos–style gallery app that stores your photos and videos in your Telegram account.
+TeleStash turns your Telegram Saved Messages into a photo library that feels like Google Photos.
 
-## The idea
+Your camera roll backs up to your own Telegram account, and the app lays it out as a familiar timeline. Pick the folders you care about, let new shots upload in the background, and keep everything at full quality.
 
-Google Photos ended free unlimited storage. Telegram provides cloud storage for files sent to yourself. TeleStash connects the two: it backs up your camera roll to your own Telegram "Saved Messages" and turns it back into a beautiful, familiar photo gallery.
+> Telegram already stores files you send yourself. TeleStash makes that storage feel like a gallery instead of a chat.
 
-TeleStash uses your Telegram account directly; there is no middleman server.
+## What you get
 
-## What it does
+- Background backup, with optional Wi-Fi and charging rules
+- A month-by-month grid, pinch-to-zoom viewer, and video playback
+- Albums, plus multi-select for bulk download or delete
+- Original files, so Telegram never re-compresses anything
+- Duplicate detection and a cleanup scan for old copies
 
-- **Automatic backup** — new photos and videos upload on their own (every ~6 hours, or instantly as they're detected), optionally only on Wi-Fi and while charging. Folders with media are auto-detected so you pick which ones to include, and exact duplicates are skipped automatically.
-- **Familiar gallery** — a grid of your backed-up media with month headers like Google Photos, pinch-to-zoom full-screen viewer, and video playback.
-- **Albums** — organize photos into albums; select a bunch and move them in one tap.
-- **Multi-select** — long-press to select, then download or delete in bulk.
-- **Upload without quality loss** — photos and videos are sent as original files, so Telegram never re-compresses them.
-- **Local data** — Room metadata and temporary upload staging stay in app-private storage, not separately encrypted by TeleStash. TDLib's local database key is wrapped by Android Keystore.
+## Building it
 
-## Getting started
-
-1. Install the app on your Android phone.
-2. On first launch, enter a Telegram `api_id` / `api_hash` (free — see below).
-3. Log in with your phone number, the code Telegram sends you, and your 2FA password if you have one.
-4. That's it — your Saved Messages is now your photo cloud.
-
-### Getting Telegram API credentials (2 minutes)
-
-1. Log in at <https://my.telegram.org>
-2. Open **API development tools**
-3. Create an app (any name works) and copy the `api_id` and `api_hash`
-
-The app stores these credentials locally and sends them to Telegram to authenticate your app.
-
-## Building from source
-
-Requirements: JDK 17+, Android SDK 37.
+You need JDK 17 or newer and Android SDK 37.
 
 ```bash
 ./gradlew assembleDebug
 ```
 
-The APKs are written to `app/build/outputs/apk/debug/` — one per ABI plus a
-universal build (`app-arm64-v8a-debug.apk` is what most phones need).
+The APKs land in `app/build/outputs/apk/debug/`. Most phones want `app-arm64-v8a-debug.apk`; there's a universal build in the same folder. Android Studio works too — open the project and hit Run.
 
-Or open the project in Android Studio and press Run.
+The first launch asks for a Telegram `api_id` and `api_hash`. They're free at [my.telegram.org](https://my.telegram.org).
 
-## Releasing
+## Before you rely on it
 
-Releases are cut by pushing a `v<major>.<minor>.<patch>` tag. Before tagging,
-add an entry for that version to [CHANGELOG.md](CHANGELOG.md) — the release
-workflow refuses to publish a tag the changelog does not describe.
-
-```bash
-bash scripts/check-changelog.sh            # validate on demand
-bash scripts/check-changelog.sh --tag v1.0.0
-```
-
-## Good to know
-
-- Telegram allows files up to **2 GB** each (4 GB with Premium) — plenty for photos and most videos.
-- Telegram is not a magic backup service: if you delete a message in Saved Messages, the photo is gone from the cloud copy too.
-
-## Roadmap
-
-- Search by caption/filename
-- "On this day" memories
-- Trash / soft delete
-- Multi-account support
+- Telegram caps files at 2 GB each (4 GB with Premium).
+- Delete a message in Saved Messages and that cloud copy is gone.
+- TeleStash keeps its index on your phone; the photos themselves stay in Telegram.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT
